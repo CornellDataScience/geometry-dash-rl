@@ -39,3 +39,15 @@ python -m gdrl.data.collector_cli --teacher-path artifacts/teacher_mock.zip --ep
 python -m gdrl.student.train_distill_dataset --data artifacts/datasets/mock_shard_000.npz --epochs 2
 ```
 This demonstrates the full teacher -> dataset -> student pipeline without Geode.
+
+## Geode IPC smoke test
+In two terminals:
+```bash
+# terminal A (fake writer)
+python -m gdrl.env.geode_ipc_test writer
+
+# terminal B (reader/env smoke)
+python -m gdrl.env.geode_ipc_test reader
+# or
+python -m gdrl.env.run_env_smoke --mode geode --steps 10
+```

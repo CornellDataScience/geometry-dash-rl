@@ -59,7 +59,11 @@ class GDPrivilegedEnv(gym.Env):
 
     def step(self, action):
         self.ipc.send_action(int(action))
-        obs = self.ipc.read_obs()
+        # If adapter supports frame-sync reads, use them.
+        if hasattr(self.ipc, 'read_next_obs'):
+            obs = self.ipc.read_next_obs(timeout_s=0.2)
+        else:
+            obs = self.ipc.read_obs()
         x = float(obs[0])
         is_dead = bool(obs[5] > 0.5)
 

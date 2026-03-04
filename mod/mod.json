@@ -1,0 +1,11 @@
+{
+    "geode": "5.3.0",
+    "gd": {
+        "mac": "2.2081"
+    },
+    "id": "com.gdrl.agent",
+    "name": "GD RL Agent",
+    "version": "v0.1.0",
+    "developer": "jzhou",
+    "description": "RL agent interface via shared memory"
+}

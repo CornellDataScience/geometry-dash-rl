@@ -1,0 +1,8 @@
+torch
+numpy
+gymnasium
+stable-baselines3
+opencv-python
+mss
+tqdm
+pyyaml

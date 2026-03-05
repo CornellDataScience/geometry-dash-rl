@@ -11,7 +11,9 @@ _OBS_FMT = f'<{_OBS_DIM}f'
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 _OBS_SIZE = struct.calcsize(_OBS_FMT)
 _ACTION_OFFSET = _HEADER_SIZE + _OBS_SIZE
-_RESERVED_OFFSET = _ACTION_OFFSET + 1
+_LEVEL_COMPLETE_OFFSET = _ACTION_OFFSET + 1
+_UPSIDE_DOWN_OFFSET = _ACTION_OFFSET + 2
+_REVERSE_OFFSET = _ACTION_OFFSET + 3
 _TOTAL_SIZE = _ACTION_OFFSET + 4
 EXPECTED_VERSION = 1
 
@@ -84,4 +86,10 @@ class GeodeSharedMemoryAdapter:
         self.buf[_ACTION_OFFSET] = 1 if int(action) else 0
 
     def read_level_complete_flag(self) -> bool:
-        return bool(self.buf[_RESERVED_OFFSET])
+        return bool(self.buf[_LEVEL_COMPLETE_OFFSET])
+
+    def read_upside_down_flag(self) -> bool:
+        return bool(self.buf[_UPSIDE_DOWN_OFFSET])
+
+    def read_reverse_flag(self) -> bool:
+        return bool(self.buf[_REVERSE_OFFSET])

@@ -7,6 +7,20 @@ from gdrl.env.geode_ipc import GeodeIPCConfig, GeodeSharedMemoryAdapter
 from gdrl.env.geode_wait import wait_for_geode_segment
 
 
+def mode_name(mode_id: int) -> str:
+    names = {
+        0: "cube",
+        1: "spaceship",
+        2: "ball",
+        3: "ufo",
+        4: "wave",
+        5: "robot",
+        6: "spider",
+        7: "swing",
+    }
+    return names.get(mode_id, f"unknown({mode_id})")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Monitor live Geometry Dash shared-memory telemetry."
@@ -56,7 +70,7 @@ def main() -> int:
         print("connected. press Ctrl+C to stop.", flush=True)
         print(f"header: version={version} tick={tick0}", flush=True)
         print(
-            "columns: tick x y vy ground dead mode complete",
+            "columns: tick x y vy upside direction mode complete",
             flush=True,
         )
 
@@ -77,6 +91,9 @@ def main() -> int:
             obs = ad.read_obs()
             tick = ad.read_tick()
             level_complete = ad.read_level_complete_flag()
+            upside_down = ad.read_upside_down_flag()
+            reverse = ad.read_reverse_flag()
+            mode_text = mode_name(int(obs[7]))
             if level_complete and not beat_announced:
                 print(
                     f"event: level_complete tick={tick}",
@@ -90,7 +107,9 @@ def main() -> int:
             if bucket != last_print_bucket:
                 print(
                     f"tick={tick:7d} x={obs[0]:8.2f} y={obs[1]:8.2f} vy={obs[2]:7.2f} "
-                    f"ground={int(obs[4])} dead={int(obs[5])} mode={int(obs[7])} "
+                    f"upside={'upside-down' if upside_down else 'normal'} "
+                    f"direction={'reverse' if reverse else 'forward'} "
+                    f"mode={mode_text} "
                     f"complete={int(level_complete)}",
                     flush=True,
                 )

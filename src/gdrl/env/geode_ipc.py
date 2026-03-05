@@ -11,6 +11,7 @@ _OBS_FMT = f'<{_OBS_DIM}f'
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 _OBS_SIZE = struct.calcsize(_OBS_FMT)
 _ACTION_OFFSET = _HEADER_SIZE + _OBS_SIZE
+_RESERVED_OFFSET = _ACTION_OFFSET + 1
 _TOTAL_SIZE = _ACTION_OFFSET + 4
 EXPECTED_VERSION = 1
 
@@ -81,3 +82,6 @@ class GeodeSharedMemoryAdapter:
 
     def send_action(self, action: int) -> None:
         self.buf[_ACTION_OFFSET] = 1 if int(action) else 0
+
+    def read_level_complete_flag(self) -> bool:
+        return bool(self.buf[_RESERVED_OFFSET])

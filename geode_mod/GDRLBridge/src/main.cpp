@@ -77,10 +77,49 @@ $on_mod(Loaded) {
 }
 
 class $modify(GDRLPlayLayer, PlayLayer) {
-    void update(float dt) {
-        PlayLayer::update(dt);
+    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+        bool ok = PlayLayer::init(level, useReplay, dontCreateObjects);
         ensure_ipc();
-        if (!g_ipc || !m_player1) return;
+        if (g_ipc) {
+            g_ipc->tick = 0;
+            g_ipc->reserved[0] = 0; // clear level-complete flag for new run
+        }
+        log::info(
+            "GDRL PlayLayer::init called ok={} level_ptr={} replay={} no_objs={}",
+            ok,
+            static_cast<void*>(level),
+            useReplay,
+            dontCreateObjects
+        );
+        return ok;
+    }
+
+    void postUpdate(float dt) {
+        PlayLayer::postUpdate(dt);
+        ensure_ipc();
+        if (!g_ipc) return;
+
+        // Increment tick on every hooked PlayLayer update so Python can verify
+        // that the frame hook is alive even if player pointer access fails.
+        g_ipc->tick += 1;
+
+        static int postDbg = 0;
+        postDbg += 1;
+        if (postDbg <= 5 || postDbg % 300 == 0) {
+            log::info(
+                "GDRL postUpdate hook tick={} has_player={}",
+                g_ipc->tick,
+                m_player1 != nullptr
+            );
+        }
+
+        static int noPlayerDbg = 0;
+        if (!m_player1) {
+            if (++noPlayerDbg <= 5 || noPlayerDbg % 300 == 0) {
+                log::warn("GDRL PlayLayer update active but m_player1 is null; tick={}", g_ipc->tick);
+            }
+            return;
+        }
 
         auto* p = m_player1;
 
@@ -95,8 +134,6 @@ class $modify(GDRLPlayLayer, PlayLayer) {
         g_ipc->obs[6] = 1.0f; // TODO: wire real speed multiplier
         g_ipc->obs[7] = static_cast<float>(mode_id_from_player(p));
 
-        g_ipc->tick += 1;
-
         static int dbg = 0;
         if (++dbg % 300 == 0) {
             log::info("GDRL update alive tick={} x={} y={} mode={}", g_ipc->tick, g_ipc->obs[0], g_ipc->obs[1], static_cast<int>(g_ipc->obs[7]));
@@ -104,5 +141,14 @@ class $modify(GDRLPlayLayer, PlayLayer) {
 
         // action_in read is present for next step (actual input injection pending)
         [[maybe_unused]] bool wantPress = g_ipc->action_in != 0;
+    }
+
+    void levelComplete() {
+        ensure_ipc();
+        if (g_ipc) {
+            g_ipc->reserved[0] = 1; // level-complete flag
+            log::info("GDRL levelComplete detected at tick={}", g_ipc->tick);
+        }
+        PlayLayer::levelComplete();
     }
 };

@@ -150,6 +150,46 @@ Or run env smoke against shared memory:
 python -m gdrl.env.run_env_smoke --mode geode --steps 10
 ```
 
+## Geode CLI and SDK setup (macOS)
+
+### 1. Install the Geode CLI
+
+Download the latest release binary directly from GitHub:
+
+```bash
+curl -L https://github.com/geode-sdk/cli/releases/download/v3.7.4/geode-cli-v3.7.4-mac.zip -o geode-cli.zip
+unzip geode-cli.zip
+sudo mv geode /usr/local/bin/geode
+geode --version
+```
+
+### 2. Configure the CLI with your Geometry Dash path
+
+```bash
+geode config setup
+```
+
+When prompted for the Geometry Dash path, use:
+
+```
+/Users/<your-username>/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app
+```
+
+### 3. Install the Geode SDK
+
+```bash
+geode sdk install
+```
+
+This sets the `GEODE_SDK` environment variable. If it is not set automatically, add it to your `~/.zshrc`:
+
+```bash
+export GEODE_SDK="$HOME/.geode/sdk"
+source ~/.zshrc
+```
+
+---
+
 ## Running with live Geode telemetry
 
 1. Build the Geode mod (example CMake flow):

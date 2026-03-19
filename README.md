@@ -196,6 +196,15 @@ geode sdk install-binaries
 
 This installs the Geode loader binaries into your Geometry Dash installation so the mod loader runs when you launch the game.
 
+### 5. Set the mods output path
+
+Add this to your `~/.zshrc` so built mods are automatically installed to the correct location:
+
+```bash
+echo 'export GEODE_MODS_PATH="/Users/<your-username>/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app/Contents/geode/mods"' >> ~/.zshrc
+source ~/.zshrc
+```
+
 ---
 
 ## Running with live Geode telemetry

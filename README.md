@@ -188,6 +188,14 @@ export GEODE_SDK="$HOME/.geode/sdk"
 source ~/.zshrc
 ```
 
+### 4. Install Geode binaries into Geometry Dash
+
+```bash
+geode sdk install-binaries
+```
+
+This installs the Geode loader binaries into your Geometry Dash installation so the mod loader runs when you launch the game.
+
 ---
 
 ## Running with live Geode telemetry

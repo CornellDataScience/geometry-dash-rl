@@ -6,7 +6,8 @@ Geode mods for Geometry Dash. Each subfolder is an independent Geode mod project
 
 | Folder | Purpose |
 | --- | --- |
-| `Telemetry/` | Active mod — writes player telemetry to shared memory (`/gdrl_ipc`) every frame |
+| `Telemetry/` | Player-only telemetry to shared memory (`/gdrl_ipc`) every frame |
+| `TelemetryObstacles/` | Player telemetry + nearby obstacle scanning to shared memory |
 | `ModTemplate/` | Clean starting point for new mods — copy this, update `mod.json`, write in `src/main.cpp` |
 
 ## Building Telemetry
@@ -18,7 +19,16 @@ cp mods/Telemetry/build/gdrl.telemetry.geode \
   "/Users/<your-username>/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app/Contents/geode/mods/"
 ```
 
-Then launch Geometry Dash, open the Geode menu (bottom-right corner), go to **Mods**, and enable **Telemetry**. Restart GD if prompted.
+## Building TelemetryObstacles
+
+```bash
+cmake -S mods/TelemetryObstacles -B mods/TelemetryObstacles/build
+cmake --build mods/TelemetryObstacles/build -j
+cp mods/TelemetryObstacles/build/gdrl.telemetry-obstacles.geode \
+  "/Users/<your-username>/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app/Contents/geode/mods/"
+```
+
+Then launch Geometry Dash, open the Geode menu (bottom-right corner), go to **Mods**, and enable the mod. Restart GD if prompted. Only enable one of Telemetry or TelemetryObstacles at a time since they share the same shared memory segment.
 
 ## Creating a new mod
 
@@ -35,3 +45,13 @@ cp mods/YourMod/build/yourname.modname.geode \
 ```
 
 5. Launch Geometry Dash, open the Geode menu (bottom-right corner), go to **Mods**, and enable your mod. Restart GD if prompted.
+
+## Running TelemetryObstacles Mod
+# player state only (default)
+python -m gdrl.env.live_monitor --print-every 25
+
+# with obstacles
+python -m gdrl.env.live_monitor --print-every 25 --show-objects
+
+# show only first k nearest obstacles
+python -m gdrl.env.live_monitor --print-every 25 --show-objects --num-objects k

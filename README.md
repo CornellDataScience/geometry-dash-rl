@@ -99,9 +99,3 @@ python -m gdrl.env.live_monitor --print-every 25
 ```bash
 python -m gdrl.env.geode_shm_cleanup --shm-name gdrl_ipc
 ```
-
-## Troubleshooting
-
-- **Timeout on `geode_wait`**: make sure a level is running and the mod is enabled in Geode
-- **Version mismatch**: compare `EXPECTED_VERSION` in `src/gdrl/env/geode_ipc.py` with `IPC_VERSION` in `mods/GDRLBridge/src/main.cpp`
-- **Stale segment**: run `python -m gdrl.env.geode_shm_cleanup --shm-name gdrl_ipc`

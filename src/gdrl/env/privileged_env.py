@@ -13,7 +13,7 @@ class IPCAdapter:
 class GDPrivilegedEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, ipc: IPCAdapter, obs_dim: int = 108, max_steps: int = 10_000):
+    def __init__(self, ipc: IPCAdapter, obs_dim: int = 608, max_steps: int = 10_000):
         # TODO: ipc must be provided — e.g. GeodeSharedMemoryAdapter
         self.ipc = ipc
         self.obs_dim = obs_dim
@@ -25,8 +25,14 @@ class GDPrivilegedEnv(gym.Env):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        self.ipc.reset_level()
-        obs = self.ipc.read_obs()
+        self.ipc.send_reset()
+        # wait for game to actually reset (tick changes + not dead)
+        for _ in range(100):
+            if hasattr(self.ipc, 'wait_next_tick'):
+                self.ipc.wait_next_tick(timeout_s=0.5)
+            obs = self.ipc.read_obs()
+            if obs[5] < 0.5:  # not dead
+                break
         self.prev_x = float(obs[0])
         self.steps = 0
         return obs, {}
@@ -40,6 +46,7 @@ class GDPrivilegedEnv(gym.Env):
             obs = self.ipc.read_obs()
         x = float(obs[0])
         is_dead = bool(obs[5] > 0.5)
+        level_done = hasattr(self.ipc, 'read_level_complete_flag') and self.ipc.read_level_complete_flag()
 
         progress = x - self.prev_x
         self.prev_x = x
@@ -48,6 +55,9 @@ class GDPrivilegedEnv(gym.Env):
 
         if is_dead:
             reward -= 10.0
+            terminated = True
+        elif level_done:
+            reward += 100.0
             terminated = True
 
         self.steps += 1

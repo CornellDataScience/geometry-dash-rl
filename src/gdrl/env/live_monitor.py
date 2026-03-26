@@ -9,8 +9,8 @@ from multiprocessing import shared_memory
 from gdrl.env.geode_ipc import GeodeIPCConfig, GeodeSharedMemoryAdapter
 
 OBJ_OBS_START = 8
-FLOATS_PER_OBJ = 5
-MAX_OBJECTS = 20
+FLOATS_PER_OBJ = 6  # relX, relY, objType, objID, scaleX, scaleY
+MAX_OBJECTS = 100
 
 OBJ_ID_NAMES = {
     8: "spikeUp", 9: "spikeDown", 39: "spike2", 103: "spike3",
@@ -51,11 +51,11 @@ def format_nearby_objects(obs, num_objects: int) -> str:
     count = min(num_objects, MAX_OBJECTS)
     for i in range(count):
         base = OBJ_OBS_START + i * FLOATS_PER_OBJ
-        relX, relY, objType, objID, scaleX = obs[base:base + FLOATS_PER_OBJ]
+        relX, relY, objType, objID, scaleX, scaleY = obs[base:base + FLOATS_PER_OBJ]
         if relX == 0.0 and relY == 0.0 and objType == 0.0 and objID == 0.0:
             break
         name = obj_name(int(objID))
-        lines.append(f"  {i+1:2d}. {name:<16s} dx={relX:+8.1f}  dy={relY:+8.1f}  scale={scaleX:.1f}")
+        lines.append(f"  {i+1:2d}. {name:<16s} dx={relX:+8.1f}  dy={relY:+8.1f}  sx={scaleX:.1f} sy={scaleY:.1f}")
     if not lines:
         return "  [0 nearby objects]"
     header = f"  [{len(lines)} nearby objects]"
@@ -113,7 +113,7 @@ def main() -> int:
         "--num-objects",
         type=int,
         default=20,
-        help="Number of nearest objects to print (max 20).",
+        help="Number of nearest objects to print (max 100).",
     )
     args = ap.parse_args()
     if args.print_every <= 0:
@@ -131,9 +131,9 @@ def main() -> int:
     ad = GeodeSharedMemoryAdapter(GeodeIPCConfig(shm_name=args.shm_name))
     try:
         ad.verify_version()
-        version, tick0 = ad._read_header()
+        version, tick0, obs_dim = ad._read_header()
         print("connected. press Ctrl+C to stop.", flush=True)
-        print(f"header: version={version} tick={tick0}", flush=True)
+        print(f"header: version={version} tick={tick0} obs_dim={obs_dim}", flush=True)
 
         frames = 0
         last_print_bucket = -1

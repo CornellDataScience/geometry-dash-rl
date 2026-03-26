@@ -1,1 +1,23 @@
-mod/build
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Artifacts
+artifacts/
+
+# Geode CLI zip
+*.zip
+
+# macOS
+.DS_Store
+
+# VSCode
+.vscode/
+
+# Misc
+,

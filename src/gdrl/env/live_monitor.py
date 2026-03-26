@@ -3,8 +3,22 @@ from __future__ import annotations
 import argparse
 import sys
 
+import time
+from multiprocessing import shared_memory
+
 from gdrl.env.geode_ipc import GeodeIPCConfig, GeodeSharedMemoryAdapter
-from gdrl.env.geode_wait import wait_for_geode_segment
+
+
+def _wait_for_segment(name: str, timeout_s: float) -> bool:
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        try:
+            shm = shared_memory.SharedMemory(name=name, create=False)
+            shm.close()
+            return True
+        except FileNotFoundError:
+            time.sleep(0.2)
+    return False
 
 
 def main() -> int:
@@ -45,7 +59,7 @@ def main() -> int:
         f"waiting for shared memory '{args.shm_name}' (timeout={args.connect_timeout:.1f}s)...",
         flush=True,
     )
-    if not wait_for_geode_segment(name=args.shm_name, timeout_s=args.connect_timeout):
+    if not _wait_for_segment(name=args.shm_name, timeout_s=args.connect_timeout):
         print("timeout waiting for Geode shared memory segment", file=sys.stderr)
         return 2
 

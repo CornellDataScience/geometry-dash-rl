@@ -7,14 +7,9 @@ from gdrl.env.privileged_env import GDPrivilegedEnv
 from gdrl.data.collector import write_shard
 
 
-def fake_frame(obs: np.ndarray, frame_idx: int) -> np.ndarray:
-    # placeholder synthetic frame generator until real screen capture is wired
-    img = np.zeros((84, 84), dtype=np.uint8)
-    x = int((obs[0] % 100) / 100 * 83)
-    y = int((obs[1] + 3) / 6 * 83)
-    img[max(0, y-2):min(84, y+3), max(0, x-2):min(84, x+3)] = 255
-    img[(frame_idx % 84), :] = 32
-    return img
+def capture_frame(obs: np.ndarray, frame_idx: int) -> np.ndarray:
+    # TODO: replace with real screen capture of the GD window (84x84 grayscale)
+    return np.zeros((84, 84), dtype=np.uint8)
 
 
 def main():
@@ -35,12 +30,12 @@ def main():
         done = False
         while not done:
             action, _ = model.predict(obs, deterministic=False)
-            # SB3 doesn't expose dist directly from predict, approximate with one-hot for now
+            # TODO: extract real action probabilities from teacher policy distribution
             teacher_prob = np.array([1.0, 0.0], dtype=np.float32)
             if int(action) == 1:
                 teacher_prob[:] = [0.0, 1.0]
 
-            frame = fake_frame(obs, idx)
+            frame = capture_frame(obs, idx)
             frames.append(frame)
             probs.append(teacher_prob)
             modes.append(int(obs[7]) % 4)

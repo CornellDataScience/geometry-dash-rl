@@ -53,7 +53,7 @@ geode config setup
 When prompted for the Geometry Dash path, use:
 
 ```
-/Users/<your-username>/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app
+$HOME/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app
 ```
 
 ### 3. Install the Geode SDK
@@ -78,24 +78,10 @@ geode sdk install-binaries
 ### 5. Set the mods output path
 
 ```bash
-echo 'export GEODE_MODS_PATH="/Users/<your-username>/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app/Contents/geode/mods"' >> ~/.zshrc
+echo 'export GEODE_MODS_PATH="$HOME/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app/Contents/geode/mods"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-## Running with live Geode telemetry
+## Running mods
 
-1. Build and install the Telemetry mod — see [mods/README.md](mods/README.md)
-
-2. Launch Geometry Dash and enter a level
-
-3. Monitor live telemetry:
-
-```bash
-python -m gdrl.env.live_monitor --print-every 25
-```
-
-4. If a stale segment remains after a crash:
-
-```bash
-python -m gdrl.env.geode_shm_cleanup --shm-name gdrl_ipc
-```
+See [mods/README.md](mods/README.md) for how to create, build, and run each mod.

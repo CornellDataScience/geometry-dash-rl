@@ -10,26 +10,6 @@ Geode mods for Geometry Dash. Each subfolder is an independent Geode mod project
 | `TelemetryObstacles/` | Player telemetry + nearby obstacle scanning to shared memory |
 | `ModTemplate/` | Clean starting point for new mods — copy this, update `mod.json`, write in `src/main.cpp` |
 
-## Building Telemetry
-
-```bash
-cmake -S mods/Telemetry -B mods/Telemetry/build
-cmake --build mods/Telemetry/build -j
-cp mods/Telemetry/build/gdrl.telemetry.geode \
-  "/Users/<your-username>/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app/Contents/geode/mods/"
-```
-
-## Building TelemetryObstacles
-
-```bash
-cmake -S mods/TelemetryObstacles -B mods/TelemetryObstacles/build
-cmake --build mods/TelemetryObstacles/build -j
-cp mods/TelemetryObstacles/build/gdrl.telemetry-obstacles.geode \
-  "/Users/<your-username>/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app/Contents/geode/mods/"
-```
-
-Then launch Geometry Dash, open the Geode menu (bottom-right corner), go to **Mods**, and enable the mod. Restart GD if prompted. Only enable one of Telemetry or TelemetryObstacles at a time since they share the same shared memory segment.
-
 ## Creating a new mod
 
 1. Copy `ModTemplate/` to a new folder
@@ -40,13 +20,44 @@ Then launch Geometry Dash, open the Geode menu (bottom-right corner), go to **Mo
 ```bash
 cmake -S mods/YourMod -B mods/YourMod/build
 cmake --build mods/YourMod/build -j
-cp mods/YourMod/build/yourname.modname.geode \
-  "/Users/<your-username>/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app/Contents/geode/mods/"
+cp mods/YourMod/build/yourname.modname.geode "$GEODE_MODS_PATH/"
 ```
 
 5. Launch Geometry Dash, open the Geode menu (bottom-right corner), go to **Mods**, and enable your mod. Restart GD if prompted.
 
-## Running TelemetryObstacles Mod
+## Building current mods
+
+### Build Telemetry
+
+```bash
+cmake -S mods/Telemetry -B mods/Telemetry/build
+cmake --build mods/Telemetry/build -j
+cp mods/Telemetry/build/gdrl.telemetry.geode "$GEODE_MODS_PATH/"
+```
+
+### Build TelemetryObstacles
+
+```bash
+cmake -S mods/TelemetryObstacles -B mods/TelemetryObstacles/build
+cmake --build mods/TelemetryObstacles/build -j
+cp mods/TelemetryObstacles/build/gdrl.telemetry-obstacles.geode "$GEODE_MODS_PATH/"
+```
+
+## Running current mods
+
+Launch Geometry Dash, open the Geode menu (bottom-right corner), go to **Mods**, and enable the mod you want to run. Restart GD if prompted.
+
+Only enable one of Telemetry or TelemetryObstacles at a time since they share the same shared memory segment.
+
+### Run Telemetry (player-state monitoring)
+
+```bash
+python -m gdrl.env.live_monitor --print-every 25
+```
+
+### Run TelemetryObstacles (player + obstacle monitoring)
+
+```bash
 # player state only (default)
 python -m gdrl.env.live_monitor --print-every 25
 
@@ -55,3 +66,10 @@ python -m gdrl.env.live_monitor --print-every 25 --show-objects
 
 # show only first k nearest obstacles
 python -m gdrl.env.live_monitor --print-every 25 --show-objects --num-objects k
+```
+
+If a stale shared memory segment remains after a crash:
+
+```bash
+python -m gdrl.env.geode_shm_cleanup --shm-name gdrl_ipc
+```

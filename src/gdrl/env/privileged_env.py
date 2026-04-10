@@ -9,39 +9,13 @@ class IPCAdapter:
     def send_action(self, action: int) -> None: ...
 
 
-class MockIPCAdapter(IPCAdapter):
-    def __init__(self, obs_dim: int = 108):
-        self.obs_dim = obs_dim
-        self.t = 0
-        self.x = 0.0
-        self.dead = False
-
-    def reset_level(self) -> None:
-        self.t = 0
-        self.x = 0.0
-        self.dead = False
-
-    def read_obs(self) -> np.ndarray:
-        obs = np.zeros((self.obs_dim,), dtype=np.float32)
-        obs[0] = self.x
-        obs[1] = np.sin(self.t / 10) * 2.0
-        obs[2] = np.cos(self.t / 15)
-        obs[5] = 1.0 if self.dead else 0.0
-        obs[7] = (self.t // 250) % 4
-        return obs
-
-    def send_action(self, action: int) -> None:
-        self.t += 1
-        self.x += 1.0 + (0.2 if action == 1 else 0.0)
-        if self.t % 400 == 0 and action == 0:
-            self.dead = True
-
 
 class GDPrivilegedEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, ipc: IPCAdapter | None = None, obs_dim: int = 108, max_steps: int = 10_000):
-        self.ipc = ipc or MockIPCAdapter(obs_dim=obs_dim)
+    def __init__(self, ipc: IPCAdapter, obs_dim: int = 608, max_steps: int = 10_000):
+        # TODO: ipc must be provided — e.g. GeodeSharedMemoryAdapter
+        self.ipc = ipc
         self.obs_dim = obs_dim
         self.max_steps = max_steps
         self.action_space = gym.spaces.Discrete(2)
@@ -51,8 +25,14 @@ class GDPrivilegedEnv(gym.Env):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        self.ipc.reset_level()
-        obs = self.ipc.read_obs()
+        self.ipc.send_reset()
+        # wait for game to actually reset (tick changes + not dead)
+        for _ in range(100):
+            if hasattr(self.ipc, 'wait_next_tick'):
+                self.ipc.wait_next_tick(timeout_s=0.5)
+            obs = self.ipc.read_obs()
+            if obs[5] < 0.5:  # not dead
+                break
         self.prev_x = float(obs[0])
         self.steps = 0
         return obs, {}
@@ -66,6 +46,7 @@ class GDPrivilegedEnv(gym.Env):
             obs = self.ipc.read_obs()
         x = float(obs[0])
         is_dead = bool(obs[5] > 0.5)
+        level_done = hasattr(self.ipc, 'read_level_complete_flag') and self.ipc.read_level_complete_flag()
 
         progress = x - self.prev_x
         self.prev_x = x
@@ -74,6 +55,9 @@ class GDPrivilegedEnv(gym.Env):
 
         if is_dead:
             reward -= 10.0
+            terminated = True
+        elif level_done:
+            reward += 100.0
             terminated = True
 
         self.steps += 1

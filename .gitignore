@@ -12,6 +12,7 @@ artifacts/
 
 # Geode CLI zip
 *.zip
+/geod
 
 # macOS
 .DS_Store

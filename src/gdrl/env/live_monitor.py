@@ -167,7 +167,8 @@ def main() -> int:
                 line = (
                     f"tick={tick:7d} x={obs[0]:8.2f} y={obs[1]:8.2f} "
                     f"vx={obs[3]:7.2f} vy={obs[2]:7.2f} "
-                    f"ground={int(obs[4])} dead={int(obs[5])} mode={mode_text} "
+                    f"speed={obs[6]:4.2f} ground={int(obs[4])} dead={int(obs[5])} "
+                    f"human_jump={int(ad.read_player_input())} mode={mode_text} "
                     f"complete={int(level_complete)}"
                 )
                 print(line, flush=True)

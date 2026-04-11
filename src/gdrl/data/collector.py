@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Dataset schema draft for distillation data."""
 
 from pathlib import Path

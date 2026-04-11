@@ -48,6 +48,10 @@ def test_mock_adapter_runs_standalone():
     assert reset_obs[0] < after[0], "send_reset should rewind x"
     assert reset_obs[5] < 0.5, "reset should clear the dead flag"
 
+    ipc.send_reset(checkpoint_x=120.0)
+    checkpoint_obs = ipc.read_obs()
+    assert checkpoint_obs[0] >= 120.0, "checkpoint reset should move near the requested x"
+
 
 def test_privileged_env_reset_and_step_shapes():
     env = _make_env(seed=2)

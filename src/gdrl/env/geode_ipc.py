@@ -5,7 +5,8 @@ import time
 from multiprocessing import shared_memory
 import numpy as np
 
-# V2 layout: version(4) + tick(4) + obs_dim(2) + obs[608](2432) + action_in(1) + ctrl_flags(1) + player_input(1) + level_done(1) + reserved(4)
+# V3 layout: version(4) + tick(4) + obs_dim(2) + obs[608](2432) + action_in(1)
+# + ctrl_flags(1) + player_input(1) + level_done(1) + reset_target_x(4)
 _HEADER_FMT = '<IIH'  # version, tick, obs_dim
 _OBS_DIM = 608
 _OBS_FMT = f'<{_OBS_DIM}f'
@@ -15,8 +16,11 @@ _ACTION_OFFSET = _HEADER_SIZE + _OBS_SIZE     # 2442
 _CTRL_FLAGS_OFFSET = _ACTION_OFFSET + 1       # 2443
 _PLAYER_INPUT_OFFSET = _CTRL_FLAGS_OFFSET + 1 # 2444
 _LEVEL_DONE_OFFSET = _PLAYER_INPUT_OFFSET + 1 # 2445
-_TOTAL_SIZE = _LEVEL_DONE_OFFSET + 1 + 4      # 2450 (+ 4 reserved)
-EXPECTED_VERSION = 2
+_RESET_TARGET_X_OFFSET = _LEVEL_DONE_OFFSET + 1
+_TOTAL_SIZE = _RESET_TARGET_X_OFFSET + 4      # 2450
+EXPECTED_VERSION = 3
+CTRL_RESET_FULL = 0x01
+CTRL_RESET_CHECKPOINT = 0x02
 
 
 @dataclass
@@ -90,9 +94,16 @@ class GeodeSharedMemoryAdapter:
     def send_action(self, action: int) -> None:
         self.buf[_ACTION_OFFSET] = 1 if int(action) else 0
 
-    def send_reset(self) -> None:
-        """Set reset_request bit in ctrl_flags."""
-        self.buf[_CTRL_FLAGS_OFFSET] = self.buf[_CTRL_FLAGS_OFFSET] | 0x01
+    def send_reset(self, checkpoint_x: float | None = None) -> None:
+        """Request either a full reset or a checkpoint reset near ``checkpoint_x``."""
+        flags = self.buf[_CTRL_FLAGS_OFFSET] & ~(CTRL_RESET_FULL | CTRL_RESET_CHECKPOINT)
+        if checkpoint_x is None or not np.isfinite(checkpoint_x) or checkpoint_x <= 0.0:
+            struct.pack_into('<f', self.buf, _RESET_TARGET_X_OFFSET, 0.0)
+            self.buf[_CTRL_FLAGS_OFFSET] = flags | CTRL_RESET_FULL
+            return
+
+        struct.pack_into('<f', self.buf, _RESET_TARGET_X_OFFSET, float(checkpoint_x))
+        self.buf[_CTRL_FLAGS_OFFSET] = flags | CTRL_RESET_CHECKPOINT
 
     def read_player_input(self) -> bool:
         """Read whether human pressed jump this frame."""

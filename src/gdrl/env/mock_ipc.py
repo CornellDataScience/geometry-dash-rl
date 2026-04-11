@@ -7,7 +7,7 @@ Matches the real ``GeodeSharedMemoryAdapter`` interface:
   - read_tick() / wait_next_tick()
   - read_obs() / read_next_obs()
   - send_action(int)
-  - send_reset()
+  - send_reset(checkpoint_x=None)
   - read_level_complete_flag()
   - read_player_input()
   - close()
@@ -128,9 +128,11 @@ class MockIPCAdapter:
         self._step_physics(self._pending_action)
         self._pending_action = 0
 
-    def send_reset(self) -> None:
+    def send_reset(self, checkpoint_x: float | None = None) -> None:
         self._pending_reset = True
-        self._reset_state()
+        start_x = 0.0 if checkpoint_x is None else float(checkpoint_x)
+        start_x = max(0.0, min(start_x, self.cfg.level_length))
+        self._reset_state(start_x=start_x)
 
     def read_level_complete_flag(self) -> bool:
         return bool(self._state.level_done)
@@ -155,8 +157,8 @@ class MockIPCAdapter:
             x += gap
         self._state.spikes = spikes
 
-    def _reset_state(self) -> None:
-        self._state.x = 0.0
+    def _reset_state(self, *, start_x: float = 0.0) -> None:
+        self._state.x = start_x
         self._state.y = self.cfg.ground_y
         self._state.y_vel = 0.0
         self._state.x_vel = self.cfg.x_velocity

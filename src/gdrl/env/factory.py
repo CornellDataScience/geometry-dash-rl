@@ -68,7 +68,7 @@ def build_ipc_adapter(cfg: EnvBuildConfig):
     )
 
 
-def build_env(cfg: EnvBuildConfig) -> GDPrivilegedEnv:
+def build_env(cfg: EnvBuildConfig, *, reset_policy=None) -> GDPrivilegedEnv:
     ipc = build_ipc_adapter(cfg)
     return GDPrivilegedEnv(
         ipc=ipc,
@@ -79,4 +79,5 @@ def build_env(cfg: EnvBuildConfig) -> GDPrivilegedEnv:
         tick_timeout_s=cfg.tick_timeout_s,
         reset_wait_ticks=cfg.reset_wait_ticks,
         reward_config=cfg.reward_config,
+        reset_policy=reset_policy,
     )

@@ -22,6 +22,7 @@ class FakeIPC:
         self.level_complete_flags = list(level_complete_flags or [False] * len(observations))
         self.actions: list[int] = []
         self.reset_calls = 0
+        self.reset_requests: list[float | None] = []
         self.player_input = False
         self._last_obs = self.observations[0]
         self._last_level_complete = False
@@ -29,8 +30,9 @@ class FakeIPC:
     def send_action(self, action: int) -> None:
         self.actions.append(int(action))
 
-    def send_reset(self) -> None:
+    def send_reset(self, checkpoint_x: float | None = None) -> None:
         self.reset_calls += 1
+        self.reset_requests.append(checkpoint_x)
 
     def read_next_obs(self, timeout_s: float = 0.2) -> np.ndarray:
         if self.observations:
@@ -87,6 +89,20 @@ class GDPrivilegedEnvTests(unittest.TestCase):
         self.assertFalse(truncated)
         self.assertEqual(info["frames"], 2)
         self.assertAlmostEqual(float(obs[0]), 8.0)
+
+    def test_reset_policy_can_request_checkpoint_reset(self):
+        class StaticResetPolicy:
+            def choose_checkpoint_x(self) -> float | None:
+                return 125.0
+
+        ipc = FakeIPC([_obs(125.0, dead=False), _obs(130.0)])
+        env = GDPrivilegedEnv(ipc=ipc, reset_policy=StaticResetPolicy())
+
+        obs, info = env.reset()
+        self.assertAlmostEqual(float(obs[0]), 125.0)
+        self.assertEqual(ipc.reset_requests, [125.0])
+        self.assertTrue(info["used_checkpoint_reset"])
+        self.assertAlmostEqual(info["reset_checkpoint_x"], 125.0)
 
     def test_stall_truncation_applies_penalty(self):
         ipc = FakeIPC([_obs(2.0), _obs(2.0), _obs(2.0)])

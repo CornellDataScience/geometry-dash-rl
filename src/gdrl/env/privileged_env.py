@@ -24,10 +24,14 @@ class IPCAdapter(Protocol):
     def read_obs(self) -> np.ndarray: ...
     def read_next_obs(self, timeout_s: float = 0.2) -> np.ndarray: ...
     def send_action(self, action: int) -> None: ...
-    def send_reset(self) -> None: ...
+    def send_reset(self, checkpoint_x: float | None = None) -> None: ...
     def read_level_complete_flag(self) -> bool: ...
     def read_player_input(self) -> bool: ...
     def close(self) -> None: ...
+
+
+class ResetPolicy(Protocol):
+    def choose_checkpoint_x(self) -> float | None: ...
 
 
 @dataclass
@@ -56,6 +60,7 @@ class GDPrivilegedEnv(gym.Env):
         tick_timeout_s: float = 0.2,
         reset_wait_ticks: int = 120,
         reward_config: RewardConfig | None = None,
+        reset_policy: ResetPolicy | None = None,
     ):
         self.obs_dim = obs_dim
         self.max_steps = max_steps
@@ -65,6 +70,7 @@ class GDPrivilegedEnv(gym.Env):
         self.reset_wait_ticks = max(1, int(reset_wait_ticks))
         self.reward_config = reward_config or RewardConfig()
         self.ipc = ipc or GeodeSharedMemoryAdapter(GeodeIPCConfig(obs_dim=obs_dim))
+        self.reset_policy = reset_policy
 
         self.action_space = gym.spaces.Discrete(2)
         self.observation_space = gym.spaces.Box(
@@ -78,6 +84,8 @@ class GDPrivilegedEnv(gym.Env):
         self.best_x = 0.0
         self.steps = 0
         self.stall_count = 0
+        self.episode_start_x = 0.0
+        self.last_reset_checkpoint_x: float | None = None
 
     def _coerce_obs(self, obs: np.ndarray) -> np.ndarray:
         arr = np.asarray(obs, dtype=np.float32).reshape(-1)
@@ -101,10 +109,22 @@ class GDPrivilegedEnv(gym.Env):
 
     def _reset_counters(self, obs: np.ndarray) -> None:
         start_x = float(obs[X_IDX])
+        self.episode_start_x = start_x
         self.prev_x = start_x
         self.best_x = start_x
         self.steps = 0
         self.stall_count = 0
+
+    def _choose_reset_checkpoint_x(self) -> float | None:
+        if self.reset_policy is None:
+            return None
+        checkpoint_x = self.reset_policy.choose_checkpoint_x()
+        if checkpoint_x is None:
+            return None
+        checkpoint_x = float(checkpoint_x)
+        if not np.isfinite(checkpoint_x) or checkpoint_x <= 0.0:
+            return None
+        return checkpoint_x
 
     def _step_reward(self, obs: np.ndarray, action: int) -> tuple[float, bool, dict]:
         x = float(obs[X_IDX])
@@ -146,12 +166,17 @@ class GDPrivilegedEnv(gym.Env):
             "level_complete": level_done,
             "player_input": self._read_player_input(),
             "stall_count": self.stall_count,
+            "episode_start_x": self.episode_start_x,
+            "used_checkpoint_reset": self.last_reset_checkpoint_x is not None,
+            "reset_checkpoint_x": float(self.last_reset_checkpoint_x or 0.0),
         }
         return reward, terminated, info
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        self.ipc.send_reset()
+        checkpoint_x = self._choose_reset_checkpoint_x()
+        self.last_reset_checkpoint_x = checkpoint_x
+        self.ipc.send_reset(checkpoint_x=checkpoint_x)
 
         obs = None
         for _ in range(self.reset_wait_ticks):
@@ -168,6 +193,9 @@ class GDPrivilegedEnv(gym.Env):
             "mode": int(obs[MODE_IDX]),
             "speed": float(obs[SPEED_IDX]),
             "stall_count": self.stall_count,
+            "used_checkpoint_reset": checkpoint_x is not None,
+            "reset_checkpoint_x": float(checkpoint_x or 0.0),
+            "episode_start_x": self.episode_start_x,
         }
         return obs, info
 

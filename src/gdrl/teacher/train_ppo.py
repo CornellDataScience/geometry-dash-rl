@@ -5,13 +5,18 @@ import json
 from pathlib import Path
 
 import torch.nn as nn
-from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 from gdrl.env.factory import EnvBuildConfig, build_env
 from gdrl.env.privileged_env import RewardConfig
+from gdrl.teacher.curriculum_reset import CurriculumResetConfig, CurriculumResetPolicy
+from gdrl.teacher.self_imitation import (
+    SelfImitationConfig,
+    SelfImitationController,
+    SelfImitatingPPO,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,6 +90,31 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--mock-x-velocity", type=float, default=10.0)
     ap.add_argument("--mock-min-gap", type=float, default=25.0)
     ap.add_argument("--mock-max-gap", type=float, default=55.0)
+    ap.add_argument(
+        "--self-imitation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use elite-prefix self-imitation to reduce forgetting on earlier segments.",
+    )
+    ap.add_argument("--si-segment-size", type=float, default=100.0)
+    ap.add_argument("--si-elite-prefixes", type=int, default=5)
+    ap.add_argument("--si-recent-episodes", type=int, default=50)
+    ap.add_argument("--si-min-mastery-episodes", type=int, default=10)
+    ap.add_argument("--si-promote-threshold", type=float, default=0.80)
+    ap.add_argument("--si-regress-threshold", type=float, default=0.50)
+    ap.add_argument("--si-bc-batch-size", type=int, default=128)
+    ap.add_argument("--si-bc-batches", type=int, default=1)
+    ap.add_argument("--si-bc-interval-rollouts", type=int, default=1)
+    ap.add_argument("--si-bc-coef", type=float, default=0.10)
+    ap.add_argument(
+        "--frontier-resets",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Reset near mastered segments via cached live checkpoints instead of always from the start.",
+    )
+    ap.add_argument("--frontier-reset-prob", type=float, default=0.7)
+    ap.add_argument("--frontier-reset-backtrack-segments", type=int, default=1)
+    ap.add_argument("--frontier-reset-warmup-episodes", type=int, default=25)
 
     return ap.parse_args()
 
@@ -119,21 +149,57 @@ def make_env_build_config(args: argparse.Namespace, seed_offset: int) -> EnvBuil
     )
 
 
-def make_env_thunk(args: argparse.Namespace, seed_offset: int):
+def make_self_imitation_config(args: argparse.Namespace) -> SelfImitationConfig:
+    return SelfImitationConfig(
+        enabled=args.self_imitation,
+        segment_size=args.si_segment_size,
+        elite_prefixes=args.si_elite_prefixes,
+        recent_episodes=args.si_recent_episodes,
+        min_mastery_episodes=args.si_min_mastery_episodes,
+        promote_threshold=args.si_promote_threshold,
+        regress_threshold=args.si_regress_threshold,
+        bc_batch_size=args.si_bc_batch_size,
+        bc_batches=args.si_bc_batches,
+        bc_interval_rollouts=args.si_bc_interval_rollouts,
+        bc_coef=args.si_bc_coef,
+    )
+
+
+def make_curriculum_reset_config(args: argparse.Namespace) -> CurriculumResetConfig:
+    return CurriculumResetConfig(
+        enabled=args.frontier_resets,
+        segment_size=args.si_segment_size,
+        checkpoint_reset_prob=args.frontier_reset_prob,
+        backtrack_segments=args.frontier_reset_backtrack_segments,
+        warmup_episodes=args.frontier_reset_warmup_episodes,
+    )
+
+
+def make_env_thunk(args: argparse.Namespace, seed_offset: int, reset_policy=None):
     def _factory():
         cfg = make_env_build_config(args, seed_offset)
-        env = build_env(cfg)
+        env = build_env(cfg, reset_policy=reset_policy)
         return Monitor(
             env,
-            info_keywords=("x", "best_x", "progress", "mode", "speed", "stall_count"),
+            info_keywords=(
+                "x",
+                "best_x",
+                "progress",
+                "mode",
+                "speed",
+                "stall_count",
+                "episode_start_x",
+                "used_checkpoint_reset",
+                "reset_checkpoint_x",
+            ),
         )
 
     return _factory
 
 
-def build_vec_env(args: argparse.Namespace, training: bool, n_envs: int | None = None):
+def build_vec_env(args: argparse.Namespace, training: bool, n_envs: int | None = None, reset_policy=None):
     n = n_envs if n_envs is not None else args.n_envs
-    thunks = [make_env_thunk(args, seed_offset=i) for i in range(n)]
+    thunks = [make_env_thunk(args, seed_offset=i, reset_policy=reset_policy) for i in range(n)]
     if args.vec_env == "subproc" and n > 1:
         vec_env = SubprocVecEnv(thunks)
     else:
@@ -151,9 +217,21 @@ def build_vec_env(args: argparse.Namespace, training: bool, n_envs: int | None =
     return vec_env
 
 
-def write_run_config(args: argparse.Namespace, out_path: Path) -> None:
+def write_run_config(
+    args: argparse.Namespace,
+    out_path: Path,
+    *,
+    self_imitation_state: dict | None = None,
+    curriculum_reset_state: dict | None = None,
+) -> None:
     payload = vars(args).copy()
     payload["reward_config"] = vars(make_reward_config(args))
+    payload["self_imitation_config"] = vars(make_self_imitation_config(args))
+    payload["curriculum_reset_config"] = vars(make_curriculum_reset_config(args))
+    if self_imitation_state is not None:
+        payload["self_imitation_state"] = self_imitation_state
+    if curriculum_reset_state is not None:
+        payload["curriculum_reset_state"] = curriculum_reset_state
     config_path = out_path.with_suffix(".json")
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -161,12 +239,28 @@ def write_run_config(args: argparse.Namespace, out_path: Path) -> None:
 
 def main():
     args = parse_args()
+    if args.frontier_resets and not args.self_imitation:
+        raise SystemExit("--frontier-resets requires --self-imitation.")
+
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    env = build_vec_env(args, training=True)
+    curriculum_reset = (
+        CurriculumResetPolicy(make_curriculum_reset_config(args), seed=args.seed)
+        if args.frontier_resets
+        else None
+    )
+    env = build_vec_env(args, training=True, reset_policy=curriculum_reset)
+    self_imitation = (
+        SelfImitationController(
+            make_self_imitation_config(args),
+            reset_policy=curriculum_reset,
+        )
+        if args.self_imitation
+        else None
+    )
 
     policy_kwargs = {
         "activation_fn": nn.ReLU,
@@ -183,7 +277,7 @@ def main():
                 "Run `pip install tensorboard` to enable.",
             )
             tensorboard_log = None
-    model = PPO(
+    model = SelfImitatingPPO(
         "MlpPolicy",
         env,
         learning_rate=args.learning_rate,
@@ -201,9 +295,12 @@ def main():
         seed=args.seed,
         verbose=1,
         device=args.device,
+        self_imitation_controller=self_imitation,
     )
 
     callbacks: list = []
+    if self_imitation is not None:
+        callbacks.append(self_imitation)
     if args.checkpoint_freq > 0:
         callbacks.append(
             CheckpointCallback(
@@ -249,7 +346,14 @@ def main():
         model.save(str(out_path))
         if isinstance(env, VecNormalize):
             env.save(str(out_path.with_suffix(".vecnorm.pkl")))
-        write_run_config(args, out_path)
+        if self_imitation is not None:
+            self_imitation.save_state(out_path.with_suffix(".self_imitation.json"))
+        write_run_config(
+            args,
+            out_path,
+            self_imitation_state=self_imitation.export_state() if self_imitation is not None else None,
+            curriculum_reset_state=curriculum_reset.export_state() if curriculum_reset is not None else None,
+        )
         env.close()
         if eval_env is not None:
             eval_env.close()

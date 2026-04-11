@@ -16,7 +16,7 @@ class ResBlock(nn.Module):
 
 
 class StudentAgent(nn.Module):
-    def __init__(self, num_modes: int = 4):
+    def __init__(self, num_modes: int = 8):
         super().__init__()
         self.backbone = nn.Sequential(
             nn.Conv2d(4, 16, 3, padding=1), nn.MaxPool2d(3, 2, 1), ResBlock(16), ResBlock(16),

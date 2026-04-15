@@ -1,0 +1,14 @@
+{
+	"geode": "5.3.0",
+	"gd": {
+		"win": "2.2081",
+		"android": "2.2081",
+		"mac": "2.2081",
+		"ios": "2.2081"
+	},
+	"id": "gdrl.training-pipeline",
+	"name": "TrainingPipeline",
+	"version": "v1.0.0",
+	"developer": "GDRL",
+	"description": "V3 SHM with ring buffer for human play recording + RL training"
+}

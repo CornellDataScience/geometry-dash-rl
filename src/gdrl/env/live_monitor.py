@@ -6,7 +6,7 @@ import sys
 import time
 from multiprocessing import shared_memory
 
-from gdrl.env.geode_ipc import GeodeIPCConfig, GeodeSharedMemoryAdapter
+from gdrl.env.geode_ipc_v3 import GeodeIPCV3Config, GeodeV3Adapter
 
 OBJ_OBS_START = 8
 FLOATS_PER_OBJ = 6  # relX, relY, objType, objID, scaleX, scaleY
@@ -78,7 +78,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Monitor live Geometry Dash shared-memory telemetry."
     )
-    ap.add_argument("--shm-name", default="gdrl_ipc", help="Shared memory segment name.")
+    ap.add_argument("--shm-name", default="gdrl_ipc_v3", help="Shared memory segment name.")
     ap.add_argument(
         "--connect-timeout",
         type=float,
@@ -128,10 +128,10 @@ def main() -> int:
         print("timeout waiting for Geode shared memory segment", file=sys.stderr)
         return 2
 
-    ad = GeodeSharedMemoryAdapter(GeodeIPCConfig(shm_name=args.shm_name))
+    ad = GeodeV3Adapter(GeodeIPCV3Config(shm_name=args.shm_name))
     try:
         ad.verify_version()
-        version, tick0, obs_dim = ad._read_header()
+        version, tick0, obs_dim, _, _, _, _ = ad._read_header()
         print("connected. press Ctrl+C to stop.", flush=True)
         print(f"header: version={version} tick={tick0} obs_dim={obs_dim}", flush=True)
 

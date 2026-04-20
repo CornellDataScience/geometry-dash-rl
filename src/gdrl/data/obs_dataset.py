@@ -122,6 +122,7 @@ class HumanPlayDataset(Dataset):
         shard_dir: str | Path,
         stack_size: int = 4,
         indices: np.ndarray | None = None,
+        preprocessor=None,
     ):
         if not _HAS_TORCH:
             raise RuntimeError("PyTorch is required for HumanPlayDataset")
@@ -131,6 +132,7 @@ class HumanPlayDataset(Dataset):
             raise FileNotFoundError(f"no shards found under {shard_dir}")
         self.index = ShardIndex(sessions)
         self.stack_size = stack_size
+        self.preprocessor = preprocessor
         self.episode_ids = self.index.episode_ids_array()
         if indices is None:
             self.indices = np.arange(len(self.index), dtype=np.int64)
@@ -165,6 +167,8 @@ class HumanPlayDataset(Dataset):
     def __getitem__(self, i: int):
         idx = int(self.indices[i])
         x = self._stacked_obs(idx)
+        if self.preprocessor is not None:
+            x = self.preprocessor.process_stacked(x, stack_size=self.stack_size)
         _, action, _ = self.index.get(idx)
         return torch.from_numpy(x), torch.tensor(action, dtype=torch.float32)
 
@@ -174,6 +178,7 @@ def train_val_split(
     val_fraction: float = 0.1,
     seed: int = 0,
     stack_size: int = 4,
+    preprocessor=None,
 ) -> Tuple["HumanPlayDataset", "HumanPlayDataset"]:
     """Split by frame index. Episodes may straddle the split — fine for BC."""
     shard_dir = Path(shard_dir)
@@ -187,6 +192,6 @@ def train_val_split(
     n_val = int(n * val_fraction)
     val_idx = perm[:n_val]
     train_idx = perm[n_val:]
-    train = HumanPlayDataset(shard_dir, stack_size=stack_size, indices=train_idx)
-    val = HumanPlayDataset(shard_dir, stack_size=stack_size, indices=val_idx)
+    train = HumanPlayDataset(shard_dir, stack_size=stack_size, indices=train_idx, preprocessor=preprocessor)
+    val = HumanPlayDataset(shard_dir, stack_size=stack_size, indices=val_idx, preprocessor=preprocessor)
     return train, val

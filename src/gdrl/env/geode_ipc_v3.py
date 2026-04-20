@@ -116,6 +116,7 @@ class GeodeV3Adapter:
                 f"V3 SHM '{self.cfg.shm_name}' too small: {len(self.buf)} < {_TOTAL_SIZE}"
             )
         self._last_consumed = None  # type: int | None
+        self._last_tick = None      # type: int | None  (for wait_next_tick)
 
     def close(self):
         try:
@@ -167,6 +168,28 @@ class GeodeV3Adapter:
 
     def read_level_complete_flag(self) -> bool:
         return bool(self.buf[_MIRROR_LEVEL_DONE_OFFSET])
+
+    def read_obs_dim(self) -> int:
+        _, _, obs_dim, _, _, _, _ = self._read_header()
+        return int(obs_dim)
+
+    # --- V2-compat: frame-sync polling on the mirror ---
+
+    def wait_next_tick(self, timeout_s: float = 0.2, poll_s: float = 0.001) -> bool:
+        t0 = time.time()
+        if self._last_tick is None:
+            self._last_tick = self.read_tick()
+        while time.time() - t0 < timeout_s:
+            tick = self.read_tick()
+            if tick != self._last_tick:
+                self._last_tick = tick
+                return True
+            time.sleep(poll_s)
+        return False
+
+    def read_next_obs(self, timeout_s: float = 0.2) -> np.ndarray:
+        self.wait_next_tick(timeout_s=timeout_s)
+        return self.read_obs()
 
     # --- ring buffer reads ---
 

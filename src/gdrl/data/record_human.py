@@ -49,7 +49,8 @@ class ShardWriter:
         self.out_dir = Path(out_root) / session_name
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.shard_size = shard_size
-        self.shard_idx = 0
+        existing = sorted(self.out_dir.glob("shard_*.npz"))
+        self.shard_idx = int(existing[-1].stem.split("_")[1]) + 1 if existing else 0
         self._reset_buffers()
 
     def _reset_buffers(self):
@@ -138,9 +139,13 @@ def main() -> int:
             if dropped:
                 total_dropped += dropped
                 print(f"WARNING: dropped {dropped} frames (Python too slow)", flush=True)
+            level_ended = False
             for f in frames:
                 writer.append(f)
                 total_frames += 1
+                if f.level_done:
+                    level_ended = True
+                    break
                 if args.max_frames > 0 and total_frames >= args.max_frames:
                     break
 
@@ -155,6 +160,9 @@ def main() -> int:
                 last_status = now
                 last_status_frames = total_frames
 
+            if level_ended:
+                print("level completed, stopping recording.", flush=True)
+                break
             if args.max_frames > 0 and total_frames >= args.max_frames:
                 break
     except KeyboardInterrupt:

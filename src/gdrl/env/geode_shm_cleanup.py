@@ -9,7 +9,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Unlink Geometry Dash RL shared-memory segment."
     )
-    ap.add_argument("--shm-name", default="gdrl_ipc", help="Shared memory segment name.")
+    ap.add_argument("--shm-name", default="gdrl_ipc_v3", help="Shared memory segment name.")
     args = ap.parse_args()
 
     try:

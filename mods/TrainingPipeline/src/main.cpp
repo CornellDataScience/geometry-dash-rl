@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
@@ -271,8 +272,12 @@ class $modify(GDRLTPPlayLayer, PlayLayer) {
         slot.level_done = g_ipc->level_done;
         slot.is_dead = isDead ? 1 : 0;
         slot.episode_id = g_ipc->episode_id;
-        // publish: bump write_index AFTER slot is fully written
-        __atomic_store_n(&g_ipc->write_index, idx + 1, __ATOMIC_RELEASE);
+        // publish: bump write_index AFTER slot is fully written.
+        // On ARM64 a naturally-aligned u32 store is atomic. We use a
+        // compiler barrier to prevent reordering the slot writes past
+        // the index update.
+        std::atomic_thread_fence(std::memory_order_release);
+        g_ipc->write_index = idx + 1;
 
         if (episodeEnded) {
             g_episodeId += 1;

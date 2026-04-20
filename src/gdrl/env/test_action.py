@@ -1,9 +1,9 @@
 """Test action injection. Run while in a level."""
-from gdrl.env.geode_ipc import GeodeSharedMemoryAdapter
+from gdrl.env.geode_ipc_v3 import GeodeV3Adapter
 import time
 import sys
 
-ipc = GeodeSharedMemoryAdapter()
+ipc = GeodeV3Adapter()
 ipc.verify_version()
 
 # wait for ticks to start advancing (means you're in a level)
@@ -19,7 +19,7 @@ else:
 
 print(f"game active at tick={ipc.read_tick()}, sending jumps...")
 
-# send jump for 10 frames
+# send jump for 1000 frames
 for i in range(1000):
     if not ipc.wait_next_tick(timeout_s=1.0):
         print("tick stalled, game paused?")

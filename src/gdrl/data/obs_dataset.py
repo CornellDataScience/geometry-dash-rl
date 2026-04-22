@@ -46,24 +46,22 @@ SESSION_STRIDE = 1_000_000  # max episodes per session before namespace wraps
 def find_shards(shard_root: str | Path) -> list[list[Path]]:
     """Return a list of sessions; each session is a sorted list of shard paths.
 
-    Accepts either:
-    - A directory containing shard_*.npz directly (treated as a single session)
-    - A directory containing one or more session subdirs, each with shards
+    Accepts any nesting depth. Groups shards by their parent directory
+    (each parent dir = one session). Handles:
+    - shard_root/shard_*.npz  (single session)
+    - shard_root/<session>/shard_*.npz  (flat sessions)
+    - shard_root/<level>/<session>/shard_*.npz  (level folders)
     """
     root = Path(shard_root)
-    # case 1: shards directly in root (legacy / single session)
-    direct = sorted(root.glob("shard_*.npz"))
-    if direct:
-        return [direct]
-    # case 2: session subdirectories
-    sessions = []
-    for subdir in sorted(root.iterdir()) if root.exists() else []:
-        if not subdir.is_dir():
-            continue
-        shards = sorted(subdir.glob("shard_*.npz"))
-        if shards:
-            sessions.append(shards)
-    return sessions
+    # find all shards recursively, group by parent dir
+    all_shards = sorted(root.rglob("shard_*.npz"))
+    if not all_shards:
+        return []
+    groups: dict[Path, list[Path]] = {}
+    for p in all_shards:
+        groups.setdefault(p.parent, []).append(p)
+    # sort sessions by directory name for deterministic ordering
+    return [sorted(shards) for _, shards in sorted(groups.items())]
 
 
 class ShardIndex:

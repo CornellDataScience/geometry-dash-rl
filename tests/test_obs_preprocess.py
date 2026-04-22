@@ -15,13 +15,10 @@ from gdrl.model.obs_preprocess import (
     RAW_OBJ_START,
     RAW_FLOATS_PER_OBJ,
     RAW_MAX_OBJECTS,
-    N_CATEGORIES,
-    CAT_HAZARD,
-    CAT_ORB,
-    CAT_PAD,
-    CAT_PORTAL,
-    CAT_BLOCK,
-    obj_category,
+    N_OBJ_TYPES,
+    EMBED_DIM,
+    BLOCK_TYPE_IDX,
+    obj_type_index,
     _subsample_objects,
     _encode_objects,
     _encode_player,
@@ -54,7 +51,7 @@ def _make_raw_obs(
 # --- dimension constants ---
 
 def test_processed_frame_dim():
-    assert PROCESSED_FRAME_DIM == 277
+    assert PROCESSED_FRAME_DIM == 157
     assert PROCESSED_FRAME_DIM == PROCESSED_PLAYER_DIM + N_SELECTED_OBJECTS * PROCESSED_OBJ_DIM
 
 
@@ -63,37 +60,80 @@ def test_processed_player_dim():
 
 
 def test_processed_obj_dim():
-    assert PROCESSED_OBJ_DIM == 9  # relX, relY, cat_onehot(5), scaleX, scaleY
+    assert PROCESSED_OBJ_DIM == 5  # relX, relY, type_id, scaleX, scaleY
 
 
-# --- category mapping ---
+def test_embedding_constants():
+    assert N_OBJ_TYPES == 42
+    assert EMBED_DIM == 8
+    assert BLOCK_TYPE_IDX == 41
 
-def test_spike_is_hazard():
-    for spike_id in [8, 9, 39, 103, 392, 421]:
-        assert obj_category(spike_id) == CAT_HAZARD
 
-def test_saw_is_hazard():
-    for saw_id in [88, 89, 98]:
-        assert obj_category(saw_id) == CAT_HAZARD
+# --- type index mapping ---
 
-def test_orb_category():
-    for orb_id in [36, 84, 141, 1022, 1330, 1594, 1704, 3005]:
-        assert obj_category(orb_id) == CAT_ORB
+def test_spike_types():
+    assert obj_type_index(8) == 0   # spikeUp
+    assert obj_type_index(9) == 1   # spikeDown
+    assert obj_type_index(39) == 2  # spike2
+    assert obj_type_index(103) == 3 # spike3
+    assert obj_type_index(392) == 4 # spikeSmall
+    assert obj_type_index(421) == 5 # spikeTiny
 
-def test_pad_category():
-    for pad_id in [35, 67, 140, 1332, 3027]:
-        assert obj_category(pad_id) == CAT_PAD
 
-def test_portal_category():
-    for portal_id in [12, 13, 200, 201, 660, 1331]:
-        assert obj_category(portal_id) == CAT_PORTAL
+def test_saw_types():
+    assert obj_type_index(88) == 6  # sawblade
+    assert obj_type_index(89) == 7  # sawbladeLg
+    assert obj_type_index(98) == 8  # sawbladeMed
 
-def test_block_category():
-    for block_id in [1, 2, 3, 40, 83, 289]:
-        assert obj_category(block_id) == CAT_BLOCK
+
+def test_orb_types():
+    assert obj_type_index(36) == 9   # yellowOrb
+    assert obj_type_index(84) == 10  # pinkOrb
+    assert obj_type_index(141) == 11 # gravOrb
+    assert obj_type_index(1022) == 12 # greenOrb
+    assert obj_type_index(1330) == 13 # redOrb
+    assert obj_type_index(1594) == 14 # dashOrb
+    assert obj_type_index(1704) == 15 # dropOrb
+    assert obj_type_index(3005) == 16 # spiderOrb
+
+
+def test_pad_types():
+    assert obj_type_index(35) == 17  # yellowPad
+    assert obj_type_index(67) == 18  # pinkPad
+    assert obj_type_index(140) == 19 # gravPad
+    assert obj_type_index(1332) == 20 # redPad
+    assert obj_type_index(3027) == 21 # spiderPad
+
+
+def test_portal_types():
+    assert obj_type_index(10) == 22  # gravPortalDown
+    assert obj_type_index(11) == 23  # gravPortalUp
+    assert obj_type_index(12) == 24  # shipPortal
+    assert obj_type_index(13) == 25  # cubePortal
+    assert obj_type_index(99) == 26  # ballPortal
+    assert obj_type_index(286) == 27 # ufoPortal
+    assert obj_type_index(660) == 28 # wavePortal
+    assert obj_type_index(745) == 29 # robotPortal
+    assert obj_type_index(1331) == 30 # spiderPortal
+    assert obj_type_index(1933) == 31 # swingPortal
+    assert obj_type_index(45) == 32  # mirrorOn
+    assert obj_type_index(46) == 33  # mirrorOff
+    assert obj_type_index(47) == 34  # bigPortal
+    assert obj_type_index(101) == 35 # miniPortal
+    assert obj_type_index(200) == 36 # speedSlow
+    assert obj_type_index(201) == 37 # speedNorm
+    assert obj_type_index(202) == 38 # speedFast
+    assert obj_type_index(203) == 39 # speedVFast
+    assert obj_type_index(1334) == 40 # speedVSlow
+
+
+def test_block_types():
+    for block_id in [1, 2, 3, 4, 5, 6, 7, 40, 83, 289, 291]:
+        assert obj_type_index(block_id) == BLOCK_TYPE_IDX
+
 
 def test_unknown_id_defaults_to_block():
-    assert obj_category(99999) == CAT_BLOCK
+    assert obj_type_index(99999) == BLOCK_TYPE_IDX
 
 
 # --- player encoding ---
@@ -175,17 +215,37 @@ def test_encode_spike():
     obj = encoded[0]
     assert obj[0] == 50.0   # relX
     assert obj[1] == 10.0   # relY
-    assert obj[2 + CAT_HAZARD] == 1.0  # hazard one-hot
-    assert obj[2 + CAT_ORB] == 0.0
-    assert obj[7] == 1.0    # scaleX
-    assert obj[8] == 1.0    # scaleY
+    assert obj[2] == 0.0    # type_id for spikeUp
+    assert obj[3] == 1.0    # scaleX
+    assert obj[4] == 1.0    # scaleY
 
 
-def test_encode_orb():
+def test_encode_yellow_orb():
     selected = np.zeros((30, 6), dtype=np.float32)
     selected[0] = [100.0, 20.0, 0.0, 36.0, 1.5, 1.5]  # yellow orb
     encoded = _encode_objects(selected)
-    assert encoded[0, 2 + CAT_ORB] == 1.0
+    assert encoded[0, 2] == 9.0  # type_id for yellowOrb
+
+
+def test_encode_gravity_orb():
+    selected = np.zeros((30, 6), dtype=np.float32)
+    selected[0] = [100.0, 20.0, 0.0, 141.0, 1.0, 1.0]  # gravity orb
+    encoded = _encode_objects(selected)
+    assert encoded[0, 2] == 11.0  # type_id for gravOrb
+
+
+def test_encode_ship_portal():
+    selected = np.zeros((30, 6), dtype=np.float32)
+    selected[0] = [200.0, 0.0, 0.0, 12.0, 1.0, 1.0]  # ship portal
+    encoded = _encode_objects(selected)
+    assert encoded[0, 2] == 24.0  # type_id for shipPortal
+
+
+def test_encode_unknown_id():
+    selected = np.zeros((30, 6), dtype=np.float32)
+    selected[0] = [50.0, 10.0, 0.0, 99999.0, 1.0, 1.0]
+    encoded = _encode_objects(selected)
+    assert encoded[0, 2] == float(BLOCK_TYPE_IDX)
 
 
 def test_encode_empty_slot_stays_zero():
@@ -243,3 +303,13 @@ def test_continuous_mask_shape():
     assert CONTINUOUS_MASK[2] == True   # dx
     assert CONTINUOUS_MASK[3] == False  # on_ground
     assert CONTINUOUS_MASK[4] == False  # mode one-hot
+
+
+def test_continuous_mask_objects():
+    # first object starts at index 7
+    base = PROCESSED_PLAYER_DIM  # 7
+    assert CONTINUOUS_MASK[base + 0] == True   # relX
+    assert CONTINUOUS_MASK[base + 1] == True   # relY
+    assert CONTINUOUS_MASK[base + 2] == False  # type_id (not continuous)
+    assert CONTINUOUS_MASK[base + 3] == True   # scaleX
+    assert CONTINUOUS_MASK[base + 4] == True   # scaleY

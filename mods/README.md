@@ -8,6 +8,7 @@ Geode mods for Geometry Dash. Each subfolder is an independent Geode mod project
 | --- | --- |
 | `Telemetry/` | Player-only telemetry to shared memory (`/gdrl_ipc`) every frame |
 | `TelemetryObstacles/` | Player telemetry + nearby obstacle scanning to shared memory |
+| `TrainingPipeline/` | V3 ring buffer for human play recording and RL training (`/gdrl_ipc_v3`) |
 | `ModTemplate/` | Clean starting point for new mods — copy this, update `mod.json`, write in `src/main.cpp` |
 
 ## Creating a new mod
@@ -43,11 +44,19 @@ cmake --build mods/TelemetryObstacles/build -j
 cp mods/TelemetryObstacles/build/gdrl.telemetry-obstacles.geode "$GEODE_MODS_PATH/"
 ```
 
+### Build TrainingPipeline
+
+```bash
+cmake -S mods/TrainingPipeline -B mods/TrainingPipeline/build
+cmake --build mods/TrainingPipeline/build -j
+cp mods/TrainingPipeline/build/gdrl.training-pipeline.geode "$GEODE_MODS_PATH/"
+```
+
 ## Running current mods
 
 Launch Geometry Dash, open the Geode menu (bottom-right corner), go to **Mods**, and enable the mod you want to run. Restart GD if prompted.
 
-Only enable one of Telemetry or TelemetryObstacles at a time since they share the same shared memory segment.
+Only enable one mod at a time — Telemetry and TelemetryObstacles share `/gdrl_ipc`, and TrainingPipeline uses a separate segment `/gdrl_ipc_v3`. Do not run TrainingPipeline alongside either Telemetry mod.
 
 ### Run Telemetry (player-state monitoring)
 
@@ -72,4 +81,16 @@ If a stale shared memory segment remains after a crash:
 
 ```bash
 python -m gdrl.env.geode_shm_cleanup --shm-name gdrl_ipc
+```
+
+### Run TrainingPipeline (human play recording + RL training)
+
+```bash
+python -m gdrl.data.record_human --out artifacts/recordings/ --shard-size 10000
+```
+
+If a stale shared memory segment remains after a crash:
+
+```bash
+python -m gdrl.env.geode_shm_cleanup --shm-name gdrl_ipc_v3
 ```

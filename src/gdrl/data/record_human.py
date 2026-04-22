@@ -1,5 +1,9 @@
 """Record human gameplay from V3 ring buffer to NPZ shards.
 
+Can be started from the main menu — the recorder waits until a level begins
+(write_index starts advancing) before recording, and stops automatically when
+the level ends (write_index stops advancing for --level-timeout seconds).
+
 Usage:
     python -m gdrl.data.record_human --out artifacts/recordings/ \\
         --shard-size 10000 --shm-name gdrl_ipc_v3
@@ -101,9 +105,12 @@ def main() -> int:
     ap.add_argument("--shm-name", default="gdrl_ipc_v3")
     ap.add_argument("--out", default="artifacts/recordings/")
     ap.add_argument("--shard-size", type=int, default=10000)
-    ap.add_argument("--connect-timeout", type=float, default=30.0)
+    ap.add_argument("--connect-timeout", type=float, default=120.0,
+                    help="Seconds to wait for the SHM segment to appear")
+    ap.add_argument("--level-timeout", type=float, default=2.0,
+                    help="Seconds of no frames before assuming the level has ended")
     ap.add_argument("--max-frames", type=int, default=0,
-                    help="Stop after N frames (0 = run until Ctrl+C)")
+                    help="Stop after N frames (0 = run until level ends or Ctrl+C)")
     ap.add_argument("--status-every", type=float, default=2.0,
                     help="Print status every N seconds.")
     args = ap.parse_args()
@@ -121,19 +128,26 @@ def main() -> int:
         ad.close()
         return 2
 
+    # wait for a level to start (write_index must begin advancing)
+    print("waiting for a level to start...", flush=True)
+    while True:
+        if ad.wait_for_frames(timeout_s=0.5):
+            break
+
     writer = ShardWriter(Path(args.out), args.shard_size)
-    print(f"writing shards to: {writer.out_dir}", flush=True)
+    print(f"level detected — writing shards to: {writer.out_dir}", flush=True)
     total_frames = 0
     total_dropped = 0
     last_status = time.time()
     last_status_frames = 0
 
-    print("recording. press Ctrl+C to stop.", flush=True)
+    print("recording. will stop automatically when you exit the level (or press Ctrl+C).", flush=True)
     try:
         while True:
-            if not ad.wait_for_frames(timeout_s=1.0):
-                # no frames in last second — game probably paused
-                continue
+            if not ad.wait_for_frames(timeout_s=args.level_timeout):
+                # no frames for level_timeout seconds — level has ended
+                print("\nlevel ended — stopping recorder.", flush=True)
+                break
             frames, dropped = ad.drain_ring()
             if dropped:
                 total_dropped += dropped

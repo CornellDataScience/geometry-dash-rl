@@ -75,7 +75,7 @@ class ShardWriter:
         self.is_dead[i] = frame.is_dead
         self.level_done[i] = frame.level_done
         self.fill += 1
-        if self.fill >= self.shard_size or frame.is_dead:
+        if self.fill >= self.shard_size:
             self.flush()
 
     def flush(self) -> None:
@@ -152,11 +152,18 @@ def main() -> int:
             if dropped:
                 total_dropped += dropped
                 print(f"WARNING: dropped {dropped} frames (Python too slow)", flush=True)
+            died = False
             for f in frames:
                 writer.append(f)
                 total_frames += 1
+                if f.is_dead:
+                    print("\nplayer died — stopping recorder.", flush=True)
+                    died = True
+                    break
                 if args.max_frames > 0 and total_frames >= args.max_frames:
                     break
+            if died:
+                break
 
             now = time.time()
             if now - last_status >= args.status_every:

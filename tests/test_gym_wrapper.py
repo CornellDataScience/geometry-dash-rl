@@ -1,7 +1,7 @@
-from gdrl.env.geode_ipc import GeodeSharedMemoryAdapter
+from gdrl.env.geode_ipc_v3 import GeodeV3Adapter
 from gdrl.env.privileged_env import GDPrivilegedEnv
 
-env = GDPrivilegedEnv(GeodeSharedMemoryAdapter())
+env = GDPrivilegedEnv(GeodeV3Adapter())
 obs, _ = env.reset()
 print(f"reset: x={obs[0]:.1f} y={obs[1]:.1f} dead={int(obs[5])}")
 

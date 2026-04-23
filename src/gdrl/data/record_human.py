@@ -53,7 +53,8 @@ class ShardWriter:
         self.out_dir = Path(out_root) / session_name
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.shard_size = shard_size
-        self.shard_idx = 0
+        existing = sorted(self.out_dir.glob("shard_*.npz"))
+        self.shard_idx = int(existing[-1].stem.split("_")[1]) + 1 if existing else 0
         self._reset_buffers()
 
     def _reset_buffers(self):
@@ -75,7 +76,7 @@ class ShardWriter:
         self.is_dead[i] = frame.is_dead
         self.level_done[i] = frame.level_done
         self.fill += 1
-        if self.fill >= self.shard_size:
+        if frame.is_dead or self.fill >= self.shard_size:
             self.flush()
 
     def flush(self) -> None:
@@ -140,6 +141,7 @@ def main() -> int:
     total_dropped = 0
     last_status = time.time()
     last_status_frames = 0
+    was_dead = False
 
     print("recording. will stop automatically when you exit the level (or press Ctrl+C).", flush=True)
     try:
@@ -152,9 +154,22 @@ def main() -> int:
             if dropped:
                 total_dropped += dropped
                 print(f"WARNING: dropped {dropped} frames (Python too slow)", flush=True)
+            died = False
+            level_ended = False
             for f in frames:
+                if f.is_dead:
+                    if not was_dead:
+                        writer.append(f)
+                        total_frames += 1
+                        was_dead = True
+                        died = True
+                    continue
+                was_dead = False
                 writer.append(f)
                 total_frames += 1
+                if f.level_done:
+                    level_ended = True
+                    break
                 if args.max_frames > 0 and total_frames >= args.max_frames:
                     break
 
@@ -169,6 +184,12 @@ def main() -> int:
                 last_status = now
                 last_status_frames = total_frames
 
+            if died:
+                print("died, stopping recording.", flush=True)
+                break
+            if level_ended:
+                print("level completed, stopping recording.", flush=True)
+                break
             if args.max_frames > 0 and total_frames >= args.max_frames:
                 break
     except KeyboardInterrupt:

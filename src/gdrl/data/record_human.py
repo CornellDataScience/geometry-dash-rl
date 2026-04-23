@@ -141,7 +141,7 @@ def main() -> int:
     last_status = time.time()
     last_status_frames = 0
 
-    print("recording. will stop automatically when you exit the level (or press Ctrl+C).", flush=True)
+    print("recording. will stop automatically when you die, exit the level, or press Ctrl+C.", flush=True)
     try:
         while True:
             if not ad.wait_for_frames(timeout_s=args.level_timeout):

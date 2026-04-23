@@ -143,7 +143,7 @@ def main() -> int:
     last_status_frames = 0
     was_dead = False
 
-    print("recording. will stop automatically when you exit the level (or press Ctrl+C).", flush=True)
+    print("recording. will stop automatically when you die, exit the level, or press Ctrl+C.", flush=True)
     try:
         while True:
             if not ad.wait_for_frames(timeout_s=args.level_timeout):
@@ -172,6 +172,8 @@ def main() -> int:
                     break
                 if args.max_frames > 0 and total_frames >= args.max_frames:
                     break
+            if died:
+                break
 
             now = time.time()
             if now - last_status >= args.status_every:

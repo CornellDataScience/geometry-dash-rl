@@ -75,7 +75,7 @@ class ShardWriter:
         self.is_dead[i] = frame.is_dead
         self.level_done[i] = frame.level_done
         self.fill += 1
-        if self.fill >= self.shard_size:
+        if self.fill >= self.shard_size or frame.is_dead:
             self.flush()
 
     def flush(self) -> None:

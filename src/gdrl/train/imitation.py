@@ -40,11 +40,13 @@ def compute_pos_weight(shard_dir: str | Path) -> float:
     return total_neg / total_pos
 
 
-def evaluate(model, loader, criterion, device) -> dict:
+def evaluate(model, loader, criterion, device, event_tolerance: int = 15) -> dict:
     model.eval()
     total_loss = 0.0
     tp = fp = fn = tn = 0
     n = 0
+    all_preds = []
+    all_labels = []
     with torch.no_grad():
         for x, y in loader:
             x, y = x.to(device), y.to(device)
@@ -58,11 +60,23 @@ def evaluate(model, loader, criterion, device) -> dict:
             fp += ((pred == 1) & (y == 0)).sum().item()
             fn += ((pred == 0) & (y == 1)).sum().item()
             tn += ((pred == 0) & (y == 0)).sum().item()
+            all_preds.append(pred.cpu().numpy())
+            all_labels.append(y.cpu().numpy())
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     accuracy = (tp + tn) / n if n > 0 else 0.0
+
+    # jump-event metrics with temporal tolerance
+    from gdrl.eval.offline_metrics import extract_jump_events, match_events
+    preds = np.concatenate(all_preds).astype(int)
+    labels = np.concatenate(all_labels).astype(int)
+    # use sequential frame indices as pseudo-episode (val loader is not shuffled)
+    episode_ids = np.zeros(len(preds), dtype=int)
+    human_events = extract_jump_events(labels, episode_ids)
+    model_events = extract_jump_events(preds, episode_ids)
+    event_metrics = match_events(human_events, model_events, tolerance=event_tolerance)
 
     return {
         "loss": total_loss / max(n, 1),
@@ -71,6 +85,9 @@ def evaluate(model, loader, criterion, device) -> dict:
         "recall": recall,
         "f1": f1,
         "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+        "event_precision": event_metrics["event_precision"],
+        "event_recall": event_metrics["event_recall"],
+        "event_f1": event_metrics["event_f1"],
     }
 
 
@@ -159,9 +176,10 @@ def main() -> int:
             f"train_loss={train_loss / max(train_n, 1):.4f} "
             f"val_loss={val_metrics['loss']:.4f} "
             f"acc={val_metrics['accuracy']:.3f} "
-            f"prec={val_metrics['precision']:.3f} "
-            f"rec={val_metrics['recall']:.3f} "
             f"f1={val_metrics['f1']:.3f} "
+            f"evt_f1={val_metrics['event_f1']:.3f} "
+            f"evt_p={val_metrics['event_precision']:.3f} "
+            f"evt_r={val_metrics['event_recall']:.3f} "
             f"({dt:.1f}s)",
             flush=True,
         )

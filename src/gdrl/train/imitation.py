@@ -15,7 +15,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from gdrl.data.obs_dataset import HumanPlayDataset, train_val_split, find_shards, ShardIndex
+from gdrl.data.obs_dataset import (
+    HumanPlayDataset,
+    train_val_split,
+    train_val_split_by_level,
+    find_shards,
+    ShardIndex,
+)
 from gdrl.model.obs_preprocess import (
     ObsPreprocessor,
     ObsNormalizer,
@@ -40,7 +46,7 @@ def compute_pos_weight(shard_dir: str | Path) -> float:
     return total_neg / total_pos
 
 
-def evaluate(model, loader, criterion, device, event_tolerance: int = 15) -> dict:
+def evaluate(model, loader, criterion, device, event_tolerance: int = 15, temporally_ordered: bool = False) -> dict:
     model.eval()
     total_loss = 0.0
     tp = fp = fn = tn = 0
@@ -69,11 +75,16 @@ def evaluate(model, loader, criterion, device, event_tolerance: int = 15) -> dic
     accuracy = (tp + tn) / n if n > 0 else 0.0
 
     # jump-event metrics with temporal tolerance
+    # only meaningful when val frames are in temporal order (e.g. held-out level)
     from gdrl.eval.offline_metrics import extract_jump_events, match_events
     preds = np.concatenate(all_preds).astype(int)
     labels = np.concatenate(all_labels).astype(int)
-    # use sequential frame indices as pseudo-episode (val loader is not shuffled)
-    episode_ids = np.zeros(len(preds), dtype=int)
+    if temporally_ordered:
+        ds = loader.dataset
+        episode_ids = ds.episode_ids[ds.indices].astype(int)
+    else:
+        # shuffled val: events aren't real, just placeholder
+        episode_ids = np.zeros(len(preds), dtype=int)
     human_events = extract_jump_events(labels, episode_ids)
     model_events = extract_jump_events(preds, episode_ids)
     event_metrics = match_events(human_events, model_events, tolerance=event_tolerance)
@@ -99,7 +110,11 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--stack", type=int, default=4)
-    ap.add_argument("--val-fraction", type=float, default=0.1)
+    ap.add_argument("--val-fraction", type=float, default=0.1,
+                    help="Random frame fraction for val (ignored if --val-level set).")
+    ap.add_argument("--val-level", default=None,
+                    help="Hold out this level dir for val (e.g. 'stereo_madness'). "
+                         "Gives meaningful evt_f1 since val is in temporal order.")
     ap.add_argument("--patience", type=int, default=10, help="Early stopping patience.")
     ap.add_argument("--no-normalize", action="store_true", help="Skip observation normalization.")
     ap.add_argument("--device", default="cpu")
@@ -128,12 +143,23 @@ def main() -> int:
     print(f"pos_weight={pos_weight_val:.1f} (1 jump per {pos_weight_val:.0f} frames)", flush=True)
 
     # build datasets
-    train_ds, val_ds = train_val_split(
-        data_dir,
-        val_fraction=args.val_fraction,
-        stack_size=args.stack,
-        preprocessor=preprocessor,
-    )
+    if args.val_level:
+        train_ds, val_ds = train_val_split_by_level(
+            data_dir,
+            val_level=args.val_level,
+            stack_size=args.stack,
+            preprocessor=preprocessor,
+        )
+        print(f"val_level={args.val_level} (held out)", flush=True)
+        temporally_ordered = True
+    else:
+        train_ds, val_ds = train_val_split(
+            data_dir,
+            val_fraction=args.val_fraction,
+            stack_size=args.stack,
+            preprocessor=preprocessor,
+        )
+        temporally_ordered = False
     print(f"train={len(train_ds)} val={len(val_ds)} frames", flush=True)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
@@ -168,7 +194,7 @@ def main() -> int:
             train_loss += loss.item() * len(y)
             train_n += len(y)
 
-        val_metrics = evaluate(model, val_loader, criterion, device)
+        val_metrics = evaluate(model, val_loader, criterion, device, temporally_ordered=temporally_ordered)
         dt = time.time() - t0
 
         print(

@@ -117,17 +117,21 @@ class HumanPlayDataset(Dataset):
 
     def __init__(
         self,
-        shard_dir: str | Path,
+        shard_dir: str | Path | None = None,
         stack_size: int = 4,
         indices: np.ndarray | None = None,
         preprocessor=None,
+        sessions: list[list[Path]] | None = None,
     ):
         if not _HAS_TORCH:
             raise RuntimeError("PyTorch is required for HumanPlayDataset")
-        shard_dir = Path(shard_dir)
-        sessions = find_shards(shard_dir)
-        if not sessions:
-            raise FileNotFoundError(f"no shards found under {shard_dir}")
+        if sessions is None:
+            if shard_dir is None:
+                raise ValueError("must provide shard_dir or sessions")
+            shard_dir = Path(shard_dir)
+            sessions = find_shards(shard_dir)
+            if not sessions:
+                raise FileNotFoundError(f"no shards found under {shard_dir}")
         self.index = ShardIndex(sessions)
         self.stack_size = stack_size
         self.preprocessor = preprocessor
@@ -192,4 +196,51 @@ def train_val_split(
     train_idx = perm[n_val:]
     train = HumanPlayDataset(shard_dir, stack_size=stack_size, indices=train_idx, preprocessor=preprocessor)
     val = HumanPlayDataset(shard_dir, stack_size=stack_size, indices=val_idx, preprocessor=preprocessor)
+    return train, val
+
+
+def train_val_split_by_level(
+    shard_dir: str | Path,
+    val_level: str,
+    stack_size: int = 4,
+    preprocessor=None,
+) -> Tuple["HumanPlayDataset", "HumanPlayDataset"]:
+    """Hold out one level for validation, train on all others.
+
+    Layout assumed: <shard_dir>/<level_name>/<session_dir>/shard_*.npz
+
+    Val frames are returned in original temporal order (not shuffled), so
+    event-level metrics computed on val are meaningful.
+    """
+    shard_dir = Path(shard_dir)
+    sessions = find_shards(shard_dir)
+    if not sessions:
+        raise FileNotFoundError(f"no shards under {shard_dir}")
+    val_path = (shard_dir / val_level).resolve()
+    if not val_path.exists() or not val_path.is_dir():
+        raise FileNotFoundError(f"val level dir not found: {val_path}")
+
+    val_sessions: list[list[Path]] = []
+    train_sessions: list[list[Path]] = []
+    for shard_paths in sessions:
+        if not shard_paths:
+            continue
+        # each session is shard_dir/<level>/<timestamp>/shard_*.npz, so
+        # the session dir's parent is the level dir
+        if shard_paths[0].resolve().parent.parent == val_path:
+            val_sessions.append(shard_paths)
+        else:
+            train_sessions.append(shard_paths)
+
+    if not val_sessions:
+        raise ValueError(f"no sessions found under {val_path}")
+    if not train_sessions:
+        raise ValueError(f"all sessions are val; nothing left to train on")
+
+    train = HumanPlayDataset(
+        sessions=train_sessions, stack_size=stack_size, preprocessor=preprocessor
+    )
+    val = HumanPlayDataset(
+        sessions=val_sessions, stack_size=stack_size, preprocessor=preprocessor
+    )
     return train, val

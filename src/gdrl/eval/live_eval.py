@@ -33,6 +33,7 @@ def run_eval(
     n_episodes: int = 10,
     stack_size: int = 4,
     timeout_s: float = 0.2,
+    verbose: bool = False,
 ) -> dict:
     """Run model for n_episodes, return aggregate metrics."""
     results = []
@@ -47,10 +48,11 @@ def run_eval(
             print(f"  episode {ep+1}: timeout waiting for level start", flush=True)
             continue
 
-        obs_stack = np.zeros((stack_size, RAW_OBS_DIM), dtype=np.float32)
+        obs_stack = None
         steps = 0
         max_x = 0.0
         completed = False
+        n_jumps_sent = 0
 
         while True:
             if not adapter.wait_next_tick(timeout_s=timeout_s):
@@ -69,16 +71,34 @@ def run_eval(
                 completed = True
                 break
 
-            # update stack (shift left, add new frame)
-            obs_stack[:-1] = obs_stack[1:]
-            obs_stack[-1] = raw_obs
+            # initialize stack by replicating first frame (matches training)
+            if obs_stack is None:
+                obs_stack = np.tile(raw_obs, (stack_size, 1))
+            else:
+                # shift left, add new frame
+                obs_stack[:-1] = obs_stack[1:]
+                obs_stack[-1] = raw_obs
 
             # preprocess and get action
             stacked_flat = obs_stack.reshape(-1)
             processed = preprocessor.process_stacked(stacked_flat, stack_size=stack_size)
             x_tensor = torch.from_numpy(processed).unsqueeze(0)
-            action = model.act(x_tensor)
+            with torch.no_grad():
+                logit, _ = model(x_tensor)
+            logit_val = float(logit.squeeze().item())
+            action = 1 if logit_val > 0.0 else 0
             adapter.send_action(action)
+            if action == 1:
+                n_jumps_sent += 1
+
+            if verbose and (steps < 20 or steps % 30 == 0 or action == 1):
+                print(
+                    f"    step={steps:4d}  x={x_pos:7.0f}  y={raw_obs[1]:6.0f}  "
+                    f"vy={raw_obs[2]:+6.2f}  on_ground={int(raw_obs[4])}  "
+                    f"logit={logit_val:+7.3f}  action={action}",
+                    flush=True,
+                )
+
             steps += 1
 
         results.append({
@@ -89,7 +109,7 @@ def run_eval(
         })
         print(
             f"  episode {ep+1}/{n_episodes}: "
-            f"steps={steps} max_x={max_x:.0f} "
+            f"steps={steps} max_x={max_x:.0f} jumps_sent={n_jumps_sent} "
             f"{'COMPLETED' if completed else 'died'}",
             flush=True,
         )
@@ -113,6 +133,7 @@ def main() -> int:
     ap.add_argument("--episodes", type=int, default=10)
     ap.add_argument("--shm-name", default="gdrl_ipc_v3")
     ap.add_argument("--stack", type=int, default=4)
+    ap.add_argument("--verbose", action="store_true", help="Print per-frame debug info.")
     args = ap.parse_args()
 
     # load model
@@ -144,7 +165,8 @@ def main() -> int:
     print(f"connected to SHM '{args.shm_name}'", flush=True)
 
     try:
-        metrics = run_eval(model, adapter, preprocessor, n_episodes=args.episodes, stack_size=stack_size)
+        metrics = run_eval(model, adapter, preprocessor, n_episodes=args.episodes,
+                           stack_size=stack_size, verbose=args.verbose)
     finally:
         adapter.close()
 

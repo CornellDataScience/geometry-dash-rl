@@ -9,10 +9,15 @@ for updates. This decouples credit assignment (per-snippet) from the long
 episode horizon and breaks temporal correlation between consecutive samples.
 
 Sparse reward (recomputed in trainer; env reward ignored):
-  r_t = progress_t * progress_scale  while alive
-  r_T = -death_penalty               on death frame
+  r_t = 0                                       while alive (within snippet)
+  r[K-1] = +survival_bonus  for surviving snippets (assigned at snippet boundary)
+  r[death_frame] = -death_penalty  for died snippets
   no level-complete bonus            (lands only in last snippet, indistinguishable
                                       from "lived through K frames" otherwise)
+
+Bootstrap is always 0: snippets are independent training signals. Value
+inflation in late-level states cannot back-propagate into earlier snippets.
+Surviving the 1st spike yields the same return as surviving the 5th.
 
 Usage:
     python -m gdrl.train.ppo \\
@@ -60,9 +65,14 @@ class _StackedEnv:
 
     def reset(self) -> tuple[torch.Tensor, dict]:
         raw_obs, info = self.env.reset()
-        self._prev_x = float(raw_obs[0])
+        new_x = float(raw_obs[0])
+        self._prev_x = new_x
         processed = self.preprocessor.process_frame(raw_obs)
         self._stack[:] = processed
+        info = dict(info) if info else {}
+        info["x"] = new_x
+        info["progress"] = 0.0
+        info["is_dead"] = False
         return torch.from_numpy(self._stack.reshape(-1).copy()), info
 
     def step(self, action: int) -> tuple[torch.Tensor, float, bool, bool, dict]:
@@ -91,6 +101,7 @@ class Snippet:
     valid_mask: torch.Tensor   # (K,) float — 1 for real frames, 0 for post-death pad
     died_within: bool
     age: int = 0
+    parent_max_x: float = 0.0  # max x reached by the parent episode (used to rank into SIL buffer)
 
 
 def _episode_to_snippets(
@@ -103,14 +114,18 @@ def _episode_to_snippets(
     gamma: float,
     obs_dim: int,
     died: bool,
-    final_value: float = 0.0,
+    survival_bonus: float,
+    parent_max_x: float = 0.0,
 ) -> list[Snippet]:
     """Slice a finished episode (or rollout-ended partial) into K-stride snippets.
 
     died: True iff the episode terminated by death (last frame is the death frame).
-    final_value: V(s_{L}) for the obs *after* the last collected step. Only used
-        when the trailing chunk is a full K frames in a non-died episode (i.e.
-        truncated by env or by rollout-end).
+    survival_bonus: terminal reward applied at the last valid frame of a non-died
+        snippet. Combined with death_penalty (already in ep_rewards on the death
+        frame), this is the binary "alive K later?" signal.
+
+    Bootstrap is always 0 — snippets are independent training signals; value
+    inflation in late-level states cannot back-propagate into earlier snippets.
     """
     L = len(ep_obs)
     snippets: list[Snippet] = []
@@ -124,20 +139,22 @@ def _episode_to_snippets(
         if not died_within and actual_len < K:
             continue
 
-        # Bootstrap V(s_{end}).
-        if died_within:
-            bootstrap = 0.0
-        elif end < L:
-            bootstrap = ep_values[end]
-        else:
-            # full chunk at episode end without death (truncated or rollout-bound)
-            bootstrap = final_value
+        # Bootstrap is always 0 — snippets are independent.
+        bootstrap = 0.0
+
+        # Build local rewards (don't mutate the caller's list). For surviving
+        # snippets, override the last valid frame's reward with survival_bonus.
+        # For died snippets, ep_rewards already has -death_penalty at the death
+        # frame from _collect_rollout, and other in-window frames are 0.
+        rewards_local = [ep_rewards[start + i] for i in range(actual_len)]
+        if not died_within and actual_len > 0:
+            rewards_local[actual_len - 1] = survival_bonus
 
         # Backward discounted return.
         returns_local = [0.0] * actual_len
         G = bootstrap
         for i in reversed(range(actual_len)):
-            G = ep_rewards[start + i] + gamma * G
+            G = rewards_local[i] + gamma * G
             returns_local[i] = G
 
         obs_t = torch.zeros(K, obs_dim)
@@ -163,6 +180,7 @@ def _episode_to_snippets(
             valid_mask=mask_t,
             died_within=died_within,
             age=0,
+            parent_max_x=parent_max_x,
         ))
 
     return snippets
@@ -242,6 +260,45 @@ class SnippetBuffer:
         return [self._items[i] for i in idx]
 
 
+class BestSnippetBuffer:
+    """Top-N buffer of snippets ranked by parent_max_x. Used by self-imitation learning.
+
+    Unlike SnippetBuffer (FIFO + age eviction), entries here only get evicted when
+    a higher-ranked snippet displaces them. So once a successful trajectory's
+    snippets are admitted, they stay until something genuinely better replaces them.
+    No age tracking — staleness is fine for SIL since the loss only uses the stored
+    actions as imitation targets, not as importance-sampled samples of the policy.
+    """
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self._items: list[Snippet] = []  # kept sorted descending by parent_max_x
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def add_many(self, snippets: list[Snippet]) -> None:
+        if not snippets:
+            return
+        self._items.extend(snippets)
+        self._items.sort(key=lambda s: s.parent_max_x, reverse=True)
+        if len(self._items) > self.capacity:
+            self._items = self._items[: self.capacity]
+
+    def sample(self, n: int) -> list[Snippet]:
+        if not self._items:
+            return []
+        n = min(n, len(self._items))
+        idx = np.random.choice(len(self._items), size=n, replace=False)
+        return [self._items[i] for i in idx]
+
+    def min_parent_max_x(self) -> float:
+        return self._items[-1].parent_max_x if self._items else 0.0
+
+    def max_parent_max_x(self) -> float:
+        return self._items[0].parent_max_x if self._items else 0.0
+
+
 def _collect_rollout(
     env: _StackedEnv,
     model: GDPolicyMLP,
@@ -249,12 +306,19 @@ def _collect_rollout(
     snippet_len: int,
     gamma: float,
     death_penalty: float,
-    progress_scale: float,
+    survival_bonus: float,
     obs_dim: int,
     device: torch.device,
     obs: torch.Tensor,
+    frontier_x: float = 0.0,
+    initial_x: float = 0.0,
 ) -> tuple[torch.Tensor, list[Snippet], dict]:
     """Run env for n_steps frames, recompute sparse reward, slice into snippets.
+
+    Progress-based exploration: when frontier_x > 0, the agent acts GREEDILY
+    while current x < frontier_x (well-explored territory) and STOCHASTICALLY
+    at/beyond it (frontier where exploration is needed). frontier_x=0 disables
+    the gating (pure stochastic, original behavior).
 
     Returns: (next_obs, list of snippets, stats).
     """
@@ -268,10 +332,14 @@ def _collect_rollout(
     ep_rewards: list[float] = []
     cur_progress = 0.0
     cur_len = 0
+    cur_x = initial_x
 
     ep_lengths: list[int] = []
     ep_progress_totals: list[float] = []
+    ep_max_x_per_episode: list[float] = []
+    cur_max_x = initial_x
     ep_died_count = 0
+    n_greedy_steps = 0
 
     for _ in range(n_steps):
         with torch.no_grad():
@@ -279,19 +347,34 @@ def _collect_rollout(
             logit = logit.squeeze()
             value = float(value.squeeze())
             dist = torch.distributions.Bernoulli(logits=logit)
-            action_t = dist.sample()
+
+            # Progress-based exploration: greedy below frontier, stochastic at/beyond.
+            # log_prob is always computed under the stochastic policy distribution,
+            # so PPO's importance-ratio still works regardless of which branch we took.
+            if cur_x < frontier_x:
+                action = int(logit.item() > 0.0)
+                action_t = torch.tensor(float(action))
+                n_greedy_steps += 1
+            else:
+                action_t = dist.sample()
+                action = int(action_t.item())
             log_prob = float(dist.log_prob(action_t))
-            action = int(action_t.item())
 
         next_obs, _env_reward, terminated, truncated, info = env.step(action)
         progress = float(info.get("progress", 0.0))
         is_dead = bool(info.get("is_dead", False))
+        cur_x = float(info.get("x", cur_x + progress))
+        if cur_x > cur_max_x:
+            cur_max_x = cur_x
 
-        # sparse reward
+        # binary survival reward: 0 while alive, -death_penalty on death frame.
+        # Survival bonus (+) is applied later at snippet boundaries inside
+        # _episode_to_snippets (only the last valid frame of a surviving
+        # snippet, not every alive frame).
         if is_dead:
             reward = -death_penalty
         else:
-            reward = progress * progress_scale
+            reward = 0.0
 
         ep_obs.append(obs.cpu().clone())
         ep_actions.append(action)
@@ -306,38 +389,49 @@ def _collect_rollout(
             snippets = _episode_to_snippets(
                 ep_obs, ep_actions, ep_logprobs, ep_values, ep_rewards,
                 K=snippet_len, gamma=gamma, obs_dim=obs_dim,
-                died=died, final_value=0.0,
+                died=died, survival_bonus=survival_bonus,
+                parent_max_x=cur_max_x,
             )
             new_snippets.extend(snippets)
             ep_lengths.append(cur_len)
             ep_progress_totals.append(cur_progress)
+            ep_max_x_per_episode.append(cur_max_x)
             if died:
                 ep_died_count += 1
             ep_obs, ep_actions, ep_logprobs, ep_values, ep_rewards = [], [], [], [], []
             cur_progress = 0.0
             cur_len = 0
-            obs, _ = env.reset()
+            obs, reset_info = env.reset()
+            cur_x = float(reset_info.get("x", 0.0))
+            cur_max_x = cur_x
         else:
             obs = next_obs
 
-    # Flush partial trailing episode (rollout boundary mid-episode).
+    # Flush partial trailing episode (rollout boundary mid-episode). With
+    # bootstrap=0, no need to evaluate V on the leftover obs.
     if len(ep_obs) > 0:
-        with torch.no_grad():
-            _, final_v = model(obs.unsqueeze(0).to(device))
-            final_v = float(final_v.squeeze())
         snippets = _episode_to_snippets(
             ep_obs, ep_actions, ep_logprobs, ep_values, ep_rewards,
             K=snippet_len, gamma=gamma, obs_dim=obs_dim,
-            died=False, final_value=final_v,
+            died=False, survival_bonus=survival_bonus,
+            parent_max_x=cur_max_x,
         )
         new_snippets.extend(snippets)
+        # the partial episode's max_x still counts toward the rollout's frontier
+        ep_max_x_per_episode.append(cur_max_x)
+
+    rollout_max_x = max(ep_max_x_per_episode) if ep_max_x_per_episode else 0.0
 
     stats = {
         "ep_len_mean": float(np.mean(ep_lengths)) if ep_lengths else None,
         "ep_progress_mean": float(np.mean(ep_progress_totals)) if ep_progress_totals else None,
+        "ep_max_x_mean": float(np.mean(ep_max_x_per_episode)) if ep_max_x_per_episode else None,
+        "rollout_max_x": float(rollout_max_x),
         "n_episodes": len(ep_lengths),
         "n_died": ep_died_count,
         "n_new_snippets": len(new_snippets),
+        "frac_greedy": n_greedy_steps / max(1, n_steps),
+        "frontier_x": frontier_x,
     }
     return obs, new_snippets, stats
 
@@ -474,6 +568,83 @@ def _update(
     }
 
 
+def _sil_update(
+    model: GDPolicyMLP,
+    optimizer: torch.optim.Optimizer,
+    sil_buffer: BestSnippetBuffer,
+    n_epochs: int,
+    batch_snippets: int,
+    sil_coef: float,
+    vf_coef: float,
+    max_grad_norm: float,
+    device: torch.device,
+) -> dict:
+    """Self-imitation learning update.
+
+    For each (s, a, R) in the SIL buffer:
+        actor_loss  = -log π(a|s) · max(0, R − V(s)).detach()
+        critic_loss = ½ · max(0, R − V(s))²
+
+    The max(0, ·) clip means only samples where the realized return EXCEEDED V
+    contribute to the gradient. The actor cannot be pushed away from anything;
+    it can only be pulled toward stored actions. The critic can only be pulled
+    *up* toward exceeded returns.
+
+    This is the stable counterweight to PPO's noisy adversarial gradient: PPO
+    can keep doing what it does, while SIL holds onto what worked.
+    """
+    if len(sil_buffer) == 0 or n_epochs == 0:
+        return {"sil_actor": 0.0, "sil_critic": 0.0, "sil_pos_frac": 0.0, "n_sil_updates": 0}
+
+    model.train()
+    actor_losses: list[float] = []
+    critic_losses: list[float] = []
+    pos_fracs: list[float] = []
+
+    for _ in range(n_epochs):
+        n_minibatches = max(1, len(sil_buffer) // batch_snippets)
+        for _ in range(n_minibatches):
+            batch = sil_buffer.sample(batch_snippets)
+            if not batch:
+                continue
+            obs_f, act_f, _old_lp, _old_v, ret_f, mask_f = _flatten_batch(batch, device)
+
+            logit, value = model(obs_f)
+            logit = logit.squeeze(-1)
+            value = value.squeeze(-1)
+
+            adv = (ret_f - value).clamp(min=0)
+            # Detach adv for the actor branch — policy gradient should flow
+            # through log π only, not back through V.
+            adv_for_actor = adv.detach()
+
+            dist = torch.distributions.Bernoulli(logits=logit)
+            log_prob = dist.log_prob(act_f)
+
+            actor_loss = _masked_mean(-log_prob * adv_for_actor, mask_f)
+            critic_loss = _masked_mean(0.5 * adv.pow(2), mask_f)
+
+            sil_loss = sil_coef * (actor_loss + vf_coef * critic_loss)
+
+            optimizer.zero_grad()
+            sil_loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            optimizer.step()
+
+            actor_losses.append(actor_loss.item())
+            critic_losses.append(critic_loss.item())
+            with torch.no_grad():
+                pos = ((adv > 0).float() * mask_f).sum() / mask_f.sum().clamp(min=1.0)
+                pos_fracs.append(pos.item())
+
+    return {
+        "sil_actor": float(np.mean(actor_losses)) if actor_losses else 0.0,
+        "sil_critic": float(np.mean(critic_losses)) if critic_losses else 0.0,
+        "sil_pos_frac": float(np.mean(pos_fracs)) if pos_fracs else 0.0,
+        "n_sil_updates": len(actor_losses),
+    }
+
+
 def _kl_coef_at(step: int, kl_init: float, kl_final: float, anneal_steps: int) -> float:
     if anneal_steps <= 0:
         return kl_init
@@ -488,21 +659,48 @@ def main() -> int:
     ap.add_argument("--norm", default=None, help=".norm.npz normalizer (auto-detected from --bc-checkpoint).")
     ap.add_argument("--total-steps", type=int, default=1_000_000)
     ap.add_argument("--n-steps", type=int, default=4096, help="Env steps per rollout.")
-    ap.add_argument("--snippet-len", type=int, default=20, help="Frames per snippet (K).")
-    ap.add_argument("--buffer-size", type=int, default=4096, help="Cross-rollout snippet buffer capacity.")
+    ap.add_argument("--snippet-len", type=int, default=60,
+                    help="Frames per snippet (K). 60 ≈ 0.5s at ~120fps — roughly one "
+                         "obstacle's decision window in stereo madness. Short K keeps "
+                         "credit attribution local: a death at obstacle N+1 cannot "
+                         "poison the gradient on the jump at obstacle N.")
+    ap.add_argument("--buffer-size", type=int, default=256,
+                    help="Cross-rollout snippet buffer capacity. Memory ≈ buffer * K * obs_dim * 4 bytes.")
     ap.add_argument("--max-snippet-age", type=int, default=4, help="Drop snippets older than this many updates.")
-    ap.add_argument("--death-floor-frac", type=float, default=0.1,
+    ap.add_argument("--frontier-frac", type=float, default=0.8,
+                    help="Progress-based exploration: act greedily while x < frontier_frac * recent_max_x; "
+                         "stochastic at/beyond. Set to 0 to disable (pure stochastic).")
+    ap.add_argument("--frontier-history", type=int, default=20,
+                    help="How many recent rollouts' max-x to track. Smaller = frontier shrinks faster on regression.")
+    ap.add_argument("--frontier-warmup-updates", type=int, default=5,
+                    help="Don't apply frontier gating until this many updates have completed. Until then, "
+                         "pure stochastic. Prevents locking in a bad post-collapse policy from update 1.")
+    # Self-imitation learning (SIL).
+    ap.add_argument("--sil-buffer-size", type=int, default=256,
+                    help="Capacity of best-trajectories buffer (top-N by parent episode max-x). 0 disables SIL.")
+    ap.add_argument("--sil-epochs", type=int, default=1,
+                    help="SIL minibatch passes per main update. 0 disables SIL.")
+    ap.add_argument("--sil-batch-snippets", type=int, default=16,
+                    help="Snippets per SIL minibatch.")
+    ap.add_argument("--sil-coef", type=float, default=0.1,
+                    help="Weight of SIL loss vs main PPO update. Smaller = gentler imitation pressure.")
+    ap.add_argument("--death-floor-frac", type=float, default=0.3,
                     help="Min fraction of each minibatch sourced from died-snippets pool.")
-    ap.add_argument("--death-penalty", type=float, default=3.0,
+    ap.add_argument("--death-penalty", type=float, default=1.0,
                     help="Negative reward applied on the death frame.")
-    ap.add_argument("--progress-scale", type=float, default=0.1,
-                    help="Per-frame reward = progress_scale * delta-x.")
+    ap.add_argument("--survival-bonus", type=float, default=1.0,
+                    help="Positive reward applied at the last valid frame of a surviving snippet.")
     ap.add_argument("--n-epochs", type=int, default=4, help="Policy+value epochs per update.")
     ap.add_argument("--value-epochs", type=int, default=1, help="Extra value-only epochs after policy.")
-    ap.add_argument("--batch-snippets", type=int, default=64,
+    ap.add_argument("--value-warmup-updates", type=int, default=3,
+                    help="For the first N updates, run ONLY value-only epochs (no policy update). "
+                         "Lets V calibrate against random initial output before policy gradients "
+                         "are computed against it. Set to 0 to disable.")
+    ap.add_argument("--batch-snippets", type=int, default=32,
                     help="Snippets per minibatch. Frame-batch ≈ batch_snippets * snippet_len.")
     ap.add_argument("--lr", type=float, default=5e-5)
-    ap.add_argument("--gamma", type=float, default=0.99)
+    ap.add_argument("--gamma", type=float, default=0.99,
+                    help="Discount. Must be high enough that gamma^K > ~0.01 or early frames carry no signal.")
     ap.add_argument("--clip-range", type=float, default=0.1)
     ap.add_argument("--vf-coef", type=float, default=0.5)
     ap.add_argument("--ent-coef", type=float, default=0.01)
@@ -576,6 +774,9 @@ def main() -> int:
     env = _StackedEnv(GDPrivilegedEnv(ipc=adapter), preprocessor, stack_size=stack_size)
     buffer = SnippetBuffer(capacity=args.buffer_size, max_age=args.max_snippet_age)
 
+    sil_enabled = args.sil_epochs > 0 and args.sil_buffer_size > 0
+    sil_buffer = BestSnippetBuffer(capacity=args.sil_buffer_size) if sil_enabled else None
+
     try:
         from torch.utils.tensorboard import SummaryWriter
         writer = SummaryWriter(log_dir=str(log_dir))
@@ -588,7 +789,24 @@ def main() -> int:
     minutes = args.total_steps / 60 / 60
     print(f"training: {args.total_steps:,} steps = {n_updates} updates", flush=True)
     print(f"snippet K={args.snippet_len}, buffer={args.buffer_size}, max_age={args.max_snippet_age}", flush=True)
-    print(f"reward: progress*{args.progress_scale}, death=-{args.death_penalty}, no level bonus", flush=True)
+    print(f"reward: binary terminal-per-snippet (survive=+{args.survival_bonus}, "
+          f"die=-{args.death_penalty}), gamma={args.gamma}, death_floor={args.death_floor_frac:.0%}",
+          flush=True)
+    if args.frontier_frac > 0:
+        print(f"progress-based exploration: greedy below {args.frontier_frac:.0%} of recent_max_x "
+              f"(history={args.frontier_history} rollouts, warmup={args.frontier_warmup_updates} updates), "
+              f"stochastic at/beyond", flush=True)
+    else:
+        print("progress-based exploration: DISABLED (pure stochastic)", flush=True)
+    if args.value_warmup_updates > 0:
+        print(f"value-head warmup: first {args.value_warmup_updates} updates do value-only training "
+              f"(no policy gradient) so V calibrates before driving advantages", flush=True)
+    if sil_enabled:
+        print(f"self-imitation learning: top-{args.sil_buffer_size} buffer ranked by parent-episode max-x, "
+              f"{args.sil_epochs} aux epochs/update, batch={args.sil_batch_snippets}, coef={args.sil_coef}",
+              flush=True)
+    else:
+        print("self-imitation learning: DISABLED", flush=True)
     print(f"at 60fps live, ≈ {minutes:.0f} min ({minutes/60:.1f} hr) of game time", flush=True)
     print(f"checkpoints -> {ckpt_dir}", flush=True)
 
@@ -596,24 +814,55 @@ def main() -> int:
     total_steps = 0
     t_start = time.time()
 
+    # Recent rollout max-x history for progress-based exploration.
+    recent_max_x: deque[float] = deque(maxlen=args.frontier_history)
+
     for update in range(1, n_updates + 1):
         # Age (and evict stale) BEFORE adding new snippets so fresh ones stay age=0.
         buffer.age()
 
+        # Compute frontier from recent history. First rollout has empty history
+        # → frontier=0 → all stochastic, which is the right cold-start behavior.
+        # Also disabled until update > frontier_warmup_updates so a bad early
+        # update can't get locked in by greedy gating.
+        if args.frontier_frac > 0 and update > args.frontier_warmup_updates:
+            max_recent = max(recent_max_x) if recent_max_x else 0.0
+            frontier_x = args.frontier_frac * max_recent
+        else:
+            frontier_x = 0.0
+
+        # initial_x for the rollout = env's current tracked x (handles
+        # mid-episode rollout-boundary case: next rollout picks up where this
+        # one left off without a reset).
         obs, new_snippets, rollout_stats = _collect_rollout(
             env=env, model=model, n_steps=args.n_steps,
             snippet_len=args.snippet_len, gamma=args.gamma,
-            death_penalty=args.death_penalty, progress_scale=args.progress_scale,
+            death_penalty=args.death_penalty, survival_bonus=args.survival_bonus,
             obs_dim=input_dim, device=device, obs=obs,
+            frontier_x=frontier_x, initial_x=env._prev_x,
         )
         buffer.add_many(new_snippets)
         total_steps += args.n_steps
 
+        # Update history for next rollout's frontier.
+        recent_max_x.append(rollout_stats["rollout_max_x"])
+
         kl_coef_now = _kl_coef_at(total_steps, args.kl_coef, args.kl_coef_final, args.kl_anneal_steps)
+
+        # Value-head warmup: until V is calibrated, advantages are noise. Run only
+        # value-only epochs (n_epochs=0 skips the policy loop). Total value epochs
+        # during warmup = n_epochs + value_epochs to match normal compute budget.
+        in_value_warmup = update <= args.value_warmup_updates
+        if in_value_warmup:
+            n_pol = 0
+            n_val = args.n_epochs + args.value_epochs
+        else:
+            n_pol = args.n_epochs
+            n_val = args.value_epochs
 
         update_stats = _update(
             model=model, optimizer=optimizer, buffer=buffer,
-            n_epochs=args.n_epochs, value_epochs=args.value_epochs,
+            n_epochs=n_pol, value_epochs=n_val,
             batch_snippets=args.batch_snippets,
             death_floor_frac=args.death_floor_frac,
             clip_range=args.clip_range, vf_coef=args.vf_coef, ent_coef=args.ent_coef,
@@ -621,21 +870,45 @@ def main() -> int:
             bc_anchor=bc_anchor, kl_coef=kl_coef_now,
         )
 
+        # SIL: admit fresh snippets to the best-buffer (rank-based eviction
+        # keeps only top-N by parent_max_x), then run the SIL auxiliary update.
+        # Skip during value-warmup since SIL is a policy update.
+        sil_stats = {"sil_actor": 0.0, "sil_critic": 0.0, "sil_pos_frac": 0.0, "n_sil_updates": 0}
+        if sil_enabled:
+            sil_buffer.add_many(new_snippets)
+            if not in_value_warmup:
+                sil_stats = _sil_update(
+                    model=model, optimizer=optimizer, sil_buffer=sil_buffer,
+                    n_epochs=args.sil_epochs, batch_snippets=args.sil_batch_snippets,
+                    sil_coef=args.sil_coef, vf_coef=args.vf_coef,
+                    max_grad_norm=args.max_grad_norm, device=device,
+                )
+
         fps = total_steps / (time.time() - t_start)
         n_died_buf = buffer.num_died()
         death_frac = n_died_buf / max(1, len(buffer))
         len_str = f"{rollout_stats['ep_len_mean']:.0f}" if rollout_stats["ep_len_mean"] is not None else "—"
         prog_str = f"{rollout_stats['ep_progress_mean']:.1f}" if rollout_stats["ep_progress_mean"] is not None else "—"
         kl_str = f" kl={update_stats['kl_to_bc']:.4f} kc={kl_coef_now:.3f}" if bc_anchor is not None else ""
+        front_str = (f" front={frontier_x:.0f}/maxx={rollout_stats['rollout_max_x']:.0f}"
+                     f" greedy={rollout_stats['frac_greedy']:.0%}") if args.frontier_frac > 0 else ""
+        warm_str = " [V-WARMUP]" if in_value_warmup else ""
+        sil_str = ""
+        if sil_enabled and sil_stats["n_sil_updates"] > 0:
+            sil_str = (f" sil={sil_stats['sil_actor']:.4f}/{sil_stats['sil_critic']:.4f}"
+                       f" sil_pos={sil_stats['sil_pos_frac']:.0%}"
+                       f" sil_buf={len(sil_buffer)}/maxx={sil_buffer.max_parent_max_x():.0f}")
+        elif sil_enabled:
+            sil_str = f" sil_buf={len(sil_buffer)}"
         print(
-            f"update={update}/{n_updates} steps={total_steps:,} fps={fps:.0f} "
+            f"update={update}/{n_updates}{warm_str} steps={total_steps:,} fps={fps:.0f} "
             f"ep_len={len_str} ep_prog={prog_str} "
             f"buf={len(buffer)}({n_died_buf}d {death_frac:.0%}) "
             f"pg={update_stats['pg_loss']:.4f} "
             f"vf={update_stats['vf_loss']:.4f} "
             f"ent={update_stats['entropy']:.4f} "
             f"r={update_stats['ratio_mean']:.3f}"
-            f"{kl_str}",
+            f"{front_str}{sil_str}{kl_str}",
             flush=True,
         )
 
@@ -644,9 +917,22 @@ def main() -> int:
                 writer.add_scalar("rollout/ep_len_mean", rollout_stats["ep_len_mean"], total_steps)
             if rollout_stats["ep_progress_mean"] is not None:
                 writer.add_scalar("rollout/ep_progress_mean", rollout_stats["ep_progress_mean"], total_steps)
+            if rollout_stats["ep_max_x_mean"] is not None:
+                writer.add_scalar("rollout/ep_max_x_mean", rollout_stats["ep_max_x_mean"], total_steps)
+            writer.add_scalar("rollout/rollout_max_x", rollout_stats["rollout_max_x"], total_steps)
             writer.add_scalar("rollout/n_episodes", rollout_stats["n_episodes"], total_steps)
             writer.add_scalar("rollout/n_died", rollout_stats["n_died"], total_steps)
             writer.add_scalar("rollout/n_new_snippets", rollout_stats["n_new_snippets"], total_steps)
+            writer.add_scalar("frontier/x", frontier_x, total_steps)
+            writer.add_scalar("frontier/frac_greedy", rollout_stats["frac_greedy"], total_steps)
+            writer.add_scalar("frontier/recent_max_x", max(recent_max_x) if recent_max_x else 0.0, total_steps)
+            if sil_enabled:
+                writer.add_scalar("sil/buffer_size", len(sil_buffer), total_steps)
+                writer.add_scalar("sil/buffer_min_max_x", sil_buffer.min_parent_max_x(), total_steps)
+                writer.add_scalar("sil/buffer_max_max_x", sil_buffer.max_parent_max_x(), total_steps)
+                writer.add_scalar("sil/actor_loss", sil_stats["sil_actor"], total_steps)
+                writer.add_scalar("sil/critic_loss", sil_stats["sil_critic"], total_steps)
+                writer.add_scalar("sil/pos_frac", sil_stats["sil_pos_frac"], total_steps)
             writer.add_scalar("buffer/size", len(buffer), total_steps)
             writer.add_scalar("buffer/death_fraction", death_frac, total_steps)
             writer.add_scalar("train/pg_loss", update_stats["pg_loss"], total_steps)

@@ -117,6 +117,9 @@ def main() -> int:
                          "Gives meaningful evt_f1 since val is in temporal order.")
     ap.add_argument("--patience", type=int, default=10, help="Early stopping patience.")
     ap.add_argument("--no-normalize", action="store_true", help="Skip observation normalization.")
+    ap.add_argument("--pretrained", default=None,
+                    help="Path to a BC checkpoint to fine-tune from. Reuses its normalizer "
+                         "(if present at <pretrained>.norm.npz).")
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
 
@@ -125,10 +128,23 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
 
-    # compute normalizer
+    # compute / load normalizer
     if args.no_normalize:
         normalizer = ObsNormalizer.identity()
         print("normalization disabled", flush=True)
+    elif args.pretrained:
+        # reuse the pretrained model's normalizer to keep input distribution
+        # identical to what its weights expect
+        pre_norm = Path(args.pretrained).with_suffix(".norm.npz")
+        if pre_norm.exists():
+            normalizer = ObsNormalizer.load(pre_norm)
+            print(f"loaded pretrained normalizer from {pre_norm}", flush=True)
+        else:
+            print(f"WARNING: no normalizer at {pre_norm}, computing fresh — may break pretrained weights", flush=True)
+            normalizer = compute_normalizer(data_dir, stack_size=args.stack)
+        norm_path = out_path.with_suffix(".norm.npz")
+        normalizer.save(norm_path)
+        print(f"saved normalizer to {norm_path}", flush=True)
     else:
         print("computing normalization stats...", flush=True)
         normalizer = compute_normalizer(data_dir, stack_size=args.stack)
@@ -168,6 +184,11 @@ def main() -> int:
     # build model
     input_dim = PROCESSED_FRAME_DIM * args.stack
     model = GDPolicyMLP(input_dim=input_dim).to(device)
+    if args.pretrained:
+        ckpt = torch.load(args.pretrained, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(f"loaded pretrained weights from {args.pretrained} "
+              f"(epoch {ckpt.get('epoch', '?')})", flush=True)
     print(f"model params: {model.param_count():,}", flush=True)
 
     criterion = nn.BCEWithLogitsLoss(

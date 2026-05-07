@@ -300,10 +300,19 @@ class $modify(GDRLTPPlayLayer, PlayLayer) {
         // reset handling
         if (g_ipc->ctrl_flags & 0x01) {
             g_ipc->ctrl_flags &= ~0x01;
+            // clear stale globals so the first frame of the new episode has
+            // valid dx and a synchronized button state
+            g_prevX = 0.f;
+            g_actionWasPressed = false;
             geode::Loader::get()->queueInMainThread([]() {
                 auto* pl = PlayLayer::get();
                 if (pl) pl->resetLevel();
             });
+        }
+        // detect death-triggered respawn (level resets without our send_reset)
+        if (isDead && !g_wasDead) {
+            g_prevX = 0.f;
+            g_actionWasPressed = false;
         }
 
         static int dbg = 0;

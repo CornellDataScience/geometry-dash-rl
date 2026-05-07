@@ -14,7 +14,6 @@ class GDPrivilegedEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, ipc: IPCAdapter, obs_dim: int = 608, max_steps: int = 10_000):
-        # TODO: ipc must be provided — e.g. GeodeSharedMemoryAdapter
         self.ipc = ipc
         self.obs_dim = obs_dim
         self.max_steps = max_steps
@@ -26,20 +25,27 @@ class GDPrivilegedEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.ipc.send_reset()
-        # wait for game to actually reset (tick changes + not dead)
         for _ in range(100):
             if hasattr(self.ipc, 'wait_next_tick'):
                 self.ipc.wait_next_tick(timeout_s=0.5)
             obs = self.ipc.read_obs()
-            if obs[5] < 0.5:  # not dead
+            if obs[5] < 0.5:
                 break
+        # burn 2 frames with action=0 to flush stale mod-globals from previous
+        # episode (g_prevX, g_actionWasPressed). The first frame after reset has
+        # corrupted dx because g_prevX = death_x. Action=0 ensures button state
+        # synchronizes with mod's tracker.
+        for _ in range(2):
+            self.ipc.send_action(0)
+            if hasattr(self.ipc, 'wait_next_tick'):
+                self.ipc.wait_next_tick(timeout_s=0.5)
+            obs = self.ipc.read_obs()
         self.prev_x = float(obs[0])
         self.steps = 0
         return obs, {}
 
     def step(self, action):
         self.ipc.send_action(int(action))
-        # If adapter supports frame-sync reads, use them.
         if hasattr(self.ipc, 'read_next_obs'):
             obs = self.ipc.read_next_obs(timeout_s=0.2)
         else:

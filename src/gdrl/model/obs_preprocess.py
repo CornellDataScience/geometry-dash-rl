@@ -24,7 +24,7 @@ N_SELECTED_OBJECTS = 30
 N_NEAREST = 15
 N_EXPONENTIAL = 15
 
-PROCESSED_PLAYER_DIM = 7      # y, vy, dx, on_ground, mode one-hot(4)
+PROCESSED_PLAYER_DIM = 8      # y, vy, dx, on_ground, mode one-hot(4)
 PROCESSED_OBJ_DIM = 5         # relX, relY, type_id, scaleX, scaleY
 PROCESSED_FRAME_DIM = PROCESSED_PLAYER_DIM + N_SELECTED_OBJECTS * PROCESSED_OBJ_DIM  # 157
 

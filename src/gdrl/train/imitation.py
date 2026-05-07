@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from gdrl.data.obs_dataset import (
@@ -29,6 +30,32 @@ from gdrl.model.obs_preprocess import (
     PROCESSED_FRAME_DIM,
 )
 from gdrl.model.mlp_agent import GDPolicyMLP
+
+
+def sigmoid_focal_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    gamma: float = 2.0,
+    alpha: float = 0.25,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """Binary focal loss from logits.
+
+    alpha weights the positive class; gamma down-weights easy examples.
+    alpha=-1 disables alpha weighting (equivalent to standard focal loss).
+    """
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    p = torch.sigmoid(logits)
+    p_t = p * targets + (1 - p) * (1 - targets)
+    loss = bce * ((1 - p_t) ** gamma)
+    if alpha >= 0:
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        loss = alpha_t * loss
+    if reduction == "mean":
+        return loss.mean()
+    if reduction == "sum":
+        return loss.sum()
+    return loss
 
 
 def compute_pos_weight(shard_dir: str | Path) -> float:
@@ -121,6 +148,10 @@ def main() -> int:
                     help="Path to a BC checkpoint to fine-tune from. Reuses its normalizer "
                          "(if present at <pretrained>.norm.npz).")
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--focal-gamma", type=float, default=2.0,
+                    help="Focal loss gamma (focusing parameter). 0 = standard BCE.")
+    ap.add_argument("--focal-alpha", type=float, default=0.25,
+                    help="Focal loss alpha (positive class weight). -1 to disable.")
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -154,9 +185,10 @@ def main() -> int:
 
     preprocessor = ObsPreprocessor(normalizer=normalizer)
 
-    # compute class weight
+    # compute class imbalance ratio (informational; used for alpha guidance)
     pos_weight_val = compute_pos_weight(data_dir)
-    print(f"pos_weight={pos_weight_val:.1f} (1 jump per {pos_weight_val:.0f} frames)", flush=True)
+    print(f"class ratio={pos_weight_val:.1f} (1 jump per {pos_weight_val:.0f} frames)", flush=True)
+    print(f"focal loss: gamma={args.focal_gamma}  alpha={args.focal_alpha}", flush=True)
 
     # build datasets
     if args.val_level:
@@ -191,8 +223,8 @@ def main() -> int:
               f"(epoch {ckpt.get('epoch', '?')})", flush=True)
     print(f"model params: {model.param_count():,}", flush=True)
 
-    criterion = nn.BCEWithLogitsLoss(
-        pos_weight=torch.tensor([pos_weight_val], device=device)
+    criterion = lambda logits, targets: sigmoid_focal_loss(
+        logits, targets, gamma=args.focal_gamma, alpha=args.focal_alpha
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 

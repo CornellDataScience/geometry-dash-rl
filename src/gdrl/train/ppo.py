@@ -667,9 +667,10 @@ def main() -> int:
     ap.add_argument("--buffer-size", type=int, default=256,
                     help="Cross-rollout snippet buffer capacity. Memory ≈ buffer * K * obs_dim * 4 bytes.")
     ap.add_argument("--max-snippet-age", type=int, default=4, help="Drop snippets older than this many updates.")
-    ap.add_argument("--frontier-frac", type=float, default=0.8,
+    ap.add_argument("--frontier-frac", type=float, default=0.0,
                     help="Progress-based exploration: act greedily while x < frontier_frac * recent_max_x; "
-                         "stochastic at/beyond. Set to 0 to disable (pure stochastic).")
+                         "stochastic at/beyond. 0 = disabled (pure stochastic). Disabled by default because "
+                         "it tended to lock in regressed policies when the agent failed to reach the frontier.")
     ap.add_argument("--frontier-history", type=int, default=20,
                     help="How many recent rollouts' max-x to track. Smaller = frontier shrinks faster on regression.")
     ap.add_argument("--frontier-warmup-updates", type=int, default=5,
@@ -678,11 +679,11 @@ def main() -> int:
     # Self-imitation learning (SIL).
     ap.add_argument("--sil-buffer-size", type=int, default=256,
                     help="Capacity of best-trajectories buffer (top-N by parent episode max-x). 0 disables SIL.")
-    ap.add_argument("--sil-epochs", type=int, default=1,
+    ap.add_argument("--sil-epochs", type=int, default=3,
                     help="SIL minibatch passes per main update. 0 disables SIL.")
     ap.add_argument("--sil-batch-snippets", type=int, default=16,
                     help="Snippets per SIL minibatch.")
-    ap.add_argument("--sil-coef", type=float, default=0.1,
+    ap.add_argument("--sil-coef", type=float, default=0.5,
                     help="Weight of SIL loss vs main PPO update. Smaller = gentler imitation pressure.")
     ap.add_argument("--death-floor-frac", type=float, default=0.3,
                     help="Min fraction of each minibatch sourced from died-snippets pool.")
@@ -692,10 +693,13 @@ def main() -> int:
                     help="Positive reward applied at the last valid frame of a surviving snippet.")
     ap.add_argument("--n-epochs", type=int, default=4, help="Policy+value epochs per update.")
     ap.add_argument("--value-epochs", type=int, default=1, help="Extra value-only epochs after policy.")
-    ap.add_argument("--value-warmup-updates", type=int, default=3,
+    ap.add_argument("--value-warmup-updates", type=int, default=0,
                     help="For the first N updates, run ONLY value-only epochs (no policy update). "
-                         "Lets V calibrate against random initial output before policy gradients "
-                         "are computed against it. Set to 0 to disable.")
+                         "Disabled by default. Theoretically protects against random-V advantages "
+                         "on update 1, but empirically seemed to amplify the asymmetric 'punish "
+                         "failure' gradient (calibrated V → death snippets get large-magnitude "
+                         "negative advantages, survived ones small positive). PPO clipping + KL "
+                         "anchor to BC already bound the damage from a noisy first update.")
     ap.add_argument("--batch-snippets", type=int, default=32,
                     help="Snippets per minibatch. Frame-batch ≈ batch_snippets * snippet_len.")
     ap.add_argument("--lr", type=float, default=5e-5)

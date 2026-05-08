@@ -64,8 +64,7 @@ def compute_pos_weight(shard_dir: str | Path) -> float:
     total_pos = 0
     total = 0
     for i in range(len(index)):
-        _, action, _ = index.get(i)
-        total_pos += action
+        total_pos += index.get_label(i)
         total += 1
     total_neg = total - total_pos
     if total_pos == 0:
@@ -80,6 +79,7 @@ def evaluate(model, loader, criterion, device, event_tolerance: int = 15, tempor
     n = 0
     all_preds = []
     all_labels = []
+    all_logits = []
     with torch.no_grad():
         for x, y in loader:
             x, y = x.to(device), y.to(device)
@@ -95,6 +95,7 @@ def evaluate(model, loader, criterion, device, event_tolerance: int = 15, tempor
             tn += ((pred == 0) & (y == 0)).sum().item()
             all_preds.append(pred.cpu().numpy())
             all_labels.append(y.cpu().numpy())
+            all_logits.append(logit.cpu().numpy())
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -106,6 +107,7 @@ def evaluate(model, loader, criterion, device, event_tolerance: int = 15, tempor
     from gdrl.eval.offline_metrics import extract_jump_events, match_events
     preds = np.concatenate(all_preds).astype(int)
     labels = np.concatenate(all_labels).astype(int)
+    logits = np.concatenate(all_logits)
     if temporally_ordered:
         ds = loader.dataset
         episode_ids = ds.episode_ids[ds.indices].astype(int)
@@ -115,6 +117,22 @@ def evaluate(model, loader, criterion, device, event_tolerance: int = 15, tempor
     human_events = extract_jump_events(labels, episode_ids)
     model_events = extract_jump_events(preds, episode_ids)
     event_metrics = match_events(human_events, model_events, tolerance=event_tolerance)
+
+    best_threshold = 0.0
+    best_threshold_f1 = f1
+    if len(logits) > 0 and labels.sum() > 0:
+        lo, hi = float(np.percentile(logits, 0.5)), float(np.percentile(logits, 99.5))
+        for threshold in np.linspace(lo, hi, 200):
+            thresh_preds = (logits > threshold).astype(int)
+            thresh_tp = int(((thresh_preds == 1) & (labels == 1)).sum())
+            thresh_fp = int(((thresh_preds == 1) & (labels == 0)).sum())
+            thresh_fn = int(((thresh_preds == 0) & (labels == 1)).sum())
+            thresh_p = thresh_tp / (thresh_tp + thresh_fp) if (thresh_tp + thresh_fp) > 0 else 0.0
+            thresh_r = thresh_tp / (thresh_tp + thresh_fn) if (thresh_tp + thresh_fn) > 0 else 0.0
+            thresh_f1 = 2 * thresh_p * thresh_r / (thresh_p + thresh_r) if (thresh_p + thresh_r) > 0 else 0.0
+            if thresh_f1 > best_threshold_f1:
+                best_threshold_f1 = thresh_f1
+                best_threshold = float(threshold)
 
     return {
         "loss": total_loss / max(n, 1),
@@ -126,6 +144,8 @@ def evaluate(model, loader, criterion, device, event_tolerance: int = 15, tempor
         "event_precision": event_metrics["event_precision"],
         "event_recall": event_metrics["event_recall"],
         "event_f1": event_metrics["event_f1"],
+        "best_threshold": best_threshold,
+        "best_threshold_f1": best_threshold_f1,
     }
 
 
@@ -150,7 +170,7 @@ def main() -> int:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--focal-gamma", type=float, default=2.0,
                     help="Focal loss gamma (focusing parameter). 0 = standard BCE.")
-    ap.add_argument("--focal-alpha", type=float, default=0.25,
+    ap.add_argument("--focal-alpha", type=float, default=0.75,
                     help="Focal loss alpha (positive class weight). -1 to disable.")
     args = ap.parse_args()
 
@@ -187,7 +207,8 @@ def main() -> int:
 
     # compute class imbalance ratio (informational; used for alpha guidance)
     pos_weight_val = compute_pos_weight(data_dir)
-    print(f"class ratio={pos_weight_val:.1f} (1 jump per {pos_weight_val:.0f} frames)", flush=True)
+    print(f"class ratio={pos_weight_val:.1f} (1 grounded jump press per {pos_weight_val:.0f} frames)", flush=True)
+    print("BC target: action=1 only when recorded input is down and obs[4] on_ground is true", flush=True)
     print(f"focal loss: gamma={args.focal_gamma}  alpha={args.focal_alpha}", flush=True)
 
     # build datasets
@@ -228,6 +249,7 @@ def main() -> int:
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    best_score = -1.0
     best_val_loss = float("inf")
     patience_counter = 0
 
@@ -259,29 +281,40 @@ def main() -> int:
             f"evt_f1={val_metrics['event_f1']:.3f} "
             f"evt_p={val_metrics['event_precision']:.3f} "
             f"evt_r={val_metrics['event_recall']:.3f} "
+            f"th={val_metrics['best_threshold']:+.3f} "
             f"({dt:.1f}s)",
             flush=True,
         )
 
-        if val_metrics["loss"] < best_val_loss:
-            best_val_loss = val_metrics["loss"]
+        score_key = "event_f1"
+        score = float(val_metrics[score_key])
+        loss = float(val_metrics["loss"])
+        improved = score > best_score or (score == best_score and loss < best_val_loss)
+
+        if improved:
+            best_score = score
+            best_val_loss = loss
             patience_counter = 0
             torch.save({
                 "model_state_dict": model.state_dict(),
                 "input_dim": input_dim,
                 "stack_size": args.stack,
+                "target_semantics": "grounded_jump_press",
                 "epoch": epoch,
+                "selection_metric": score_key,
+                "selection_score": best_score,
+                "action_threshold": float(val_metrics["best_threshold"]),
                 "val_loss": best_val_loss,
                 "val_metrics": val_metrics,
             }, out_path)
-            print(f"  saved best model → {out_path}", flush=True)
+            print(f"  saved best model by {score_key}={best_score:.4f} → {out_path}", flush=True)
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
                 print(f"early stopping at epoch {epoch} (patience={args.patience})", flush=True)
                 break
 
-    print(f"done. best val_loss={best_val_loss:.4f}", flush=True)
+    print(f"done. best {score_key}={best_score:.4f} val_loss={best_val_loss:.4f}", flush=True)
     return 0
 
 

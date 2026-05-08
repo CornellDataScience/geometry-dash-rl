@@ -36,7 +36,8 @@ artifacts/recordings/
         ...
 ```
 
-Each shard stores per-frame: `obs (N,608)`, `actions`, `ticks`, `episode_ids`, `is_dead`, `level_done`.
+Each recorded shard stores per-frame: `obs (N,608)`, raw `actions`, `ticks`, `episode_ids`, `is_dead`, `level_done`.
+BC derives its training target as `actions && obs[4]`, so positives mean grounded jump presses, not held input duration.
 
 ---
 
@@ -61,7 +62,7 @@ Uses a rolling 4-frame history buffer so the stacked input to the policy matches
 
 ### 2. Align rollout states to human labels
 
-For each frame the policy visited, find the nearest human frame at the same X position and use the human's action as the correct label:
+For each frame the policy visited, find the nearest human frame at the same X position and use the human's grounded jump press as the correct label:
 
 ```bash
 python -m gdrl.data.dagger_align \
@@ -70,7 +71,7 @@ python -m gdrl.data.dagger_align \
     --out artifacts/dagger_labeled/iter1.npz
 ```
 
-Output `.npz`: `obs (N,608)`, `actions (N,)`, `x_pos (N,)`, `episode_ids (N,)`.
+Output `.npz`: `obs (N,608)`, `actions (N,)`, `x_pos (N,)`, `episode_ids (N,)`, where `actions` are grounded press labels.
 
 The observations come from the policy's trajectory (including failure states). The labels always come from the human expert. This is what makes DAgger different from plain behavioral cloning.
 

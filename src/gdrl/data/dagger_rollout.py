@@ -67,6 +67,8 @@ def run_rollout(policy: TeacherPolicy, env: GDPrivilegedEnv, episodes: int, devi
         while not done:
             obs_stacked = _make_stack(frame_buf, device)
             action = int(policy.predict(obs_stacked).item())
+            if float(obs[4]) <= 0.5:
+                action = 0
 
             all_obs.append(obs.copy())
             all_x.append(float(obs[0]))

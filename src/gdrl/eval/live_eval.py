@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from gdrl.data.obs_dataset import action_allowed, near_jump_orb
 from gdrl.env.geode_ipc_v3 import GeodeV3Adapter, GeodeIPCV3Config
 from gdrl.model.mlp_agent import GDPolicyMLP
 from gdrl.model.obs_preprocess import (
@@ -34,6 +35,7 @@ def run_eval(
     stack_size: int = 4,
     timeout_s: float = 0.2,
     verbose: bool = False,
+    action_threshold: float = 0.0,
 ) -> dict:
     """Run model for n_episodes, return aggregate metrics."""
     results = []
@@ -86,7 +88,8 @@ def run_eval(
             with torch.no_grad():
                 logit, _ = model(x_tensor)
             logit_val = float(logit.squeeze().item())
-            action = 1 if logit_val > 0.0 else 0
+            allowed = action_allowed(raw_obs)
+            action = 1 if logit_val > action_threshold and allowed else 0
             adapter.send_action(action)
             if action == 1:
                 n_jumps_sent += 1
@@ -95,7 +98,8 @@ def run_eval(
                 print(
                     f"    step={steps:4d}  x={x_pos:7.0f}  y={raw_obs[1]:6.0f}  "
                     f"vy={raw_obs[2]:+6.2f}  on_ground={int(raw_obs[4])}  "
-                    f"logit={logit_val:+7.3f}  action={action}",
+                    f"orb={int(near_jump_orb(raw_obs))}  "
+                    f"logit={logit_val:+7.3f}  th={action_threshold:+.3f}  action={action}",
                     flush=True,
                 )
 
@@ -133,6 +137,8 @@ def main() -> int:
     ap.add_argument("--episodes", type=int, default=10)
     ap.add_argument("--shm-name", default="gdrl_ipc_v3")
     ap.add_argument("--stack", type=int, default=4)
+    ap.add_argument("--threshold", type=float, default=None,
+                    help="Action logit threshold. Defaults to checkpoint action_threshold if present, else 0.")
     ap.add_argument("--verbose", action="store_true", help="Print per-frame debug info.")
     args = ap.parse_args()
 
@@ -144,6 +150,10 @@ def main() -> int:
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     print(f"loaded model from {args.model} (epoch {checkpoint.get('epoch', '?')})", flush=True)
+    action_threshold = args.threshold
+    if action_threshold is None:
+        action_threshold = float(checkpoint.get("action_threshold", 0.0))
+    print(f"action threshold: {action_threshold:+.3f}", flush=True)
 
     # load normalizer
     norm_path = args.norm
@@ -166,7 +176,8 @@ def main() -> int:
 
     try:
         metrics = run_eval(model, adapter, preprocessor, n_episodes=args.episodes,
-                           stack_size=stack_size, verbose=args.verbose)
+                           stack_size=stack_size, verbose=args.verbose,
+                           action_threshold=action_threshold)
     finally:
         adapter.close()
 

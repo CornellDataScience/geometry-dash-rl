@@ -40,7 +40,72 @@ except ImportError:  # pragma: no cover
 
 
 OBS_DIM = 608
+ON_GROUND_IDX = 4
+RAW_OBJ_START = 8
+RAW_FLOATS_PER_OBJ = 6
+RAW_MAX_OBJECTS = 100
+ORB_OBJECT_IDS = {36, 84, 141, 1022, 1330, 1594, 1704, 3005}
 SESSION_STRIDE = 1_000_000  # max episodes per session before namespace wraps
+TARGET_SEMANTICS = "grounded_jump_press"
+
+
+def near_jump_orb(raw_obs: np.ndarray, x_window: float = 90.0, y_window: float = 140.0) -> bool:
+    """Return True when a jump orb/ring is close enough to be pressable."""
+    objects = np.asarray(raw_obs)[RAW_OBJ_START:].reshape(RAW_MAX_OBJECTS, RAW_FLOATS_PER_OBJ)
+    for rel_x, rel_y, _obj_type, obj_id, _scale_x, _scale_y in objects:
+        if int(obj_id) in ORB_OBJECT_IDS and abs(float(rel_x)) <= x_window and abs(float(rel_y)) <= y_window:
+            return True
+    return False
+
+
+def action_allowed(raw_obs: np.ndarray) -> bool:
+    """Whether a press can have an effect: grounded jump or airborne orb hit."""
+    return float(raw_obs[ON_GROUND_IDX]) > 0.5 or near_jump_orb(raw_obs)
+
+
+def grounded_jump_label(obs: np.ndarray, action: int) -> int:
+    """Gate an already-timed jump label by whether a press can affect gameplay."""
+    return int(int(action) == 1 and action_allowed(obs))
+
+
+def grounded_jump_labels(obs: np.ndarray, actions: np.ndarray) -> np.ndarray:
+    """Gate already-timed jump labels by whether a press can affect gameplay."""
+    obs = np.asarray(obs)
+    allowed = np.asarray([action_allowed(frame) for frame in obs], dtype=bool)
+    return (np.asarray(actions).astype(bool) & allowed).astype(np.uint8)
+
+
+def raw_input_to_press_labels(
+    obs: np.ndarray,
+    actions: np.ndarray,
+    episode_ids: np.ndarray | None = None,
+) -> np.ndarray:
+    """Convert raw held input into decision-frame jump press labels.
+
+    A held button can create multiple effective jumps: the initial press, and
+    each later frame where the player becomes pressable again while input is
+    still held. Telemetry records input after physics has applied it, so an
+    initial rising edge is labeled one frame earlier when possible.
+    """
+    obs = np.asarray(obs)
+    actions_bool = np.asarray(actions).astype(bool)
+    labels = np.zeros(len(actions_bool), dtype=np.uint8)
+    if len(actions_bool) < 2:
+        return labels
+
+    same_episode = np.ones(len(actions_bool) - 1, dtype=bool)
+    if episode_ids is not None:
+        eps = np.asarray(episode_ids)
+        same_episode = eps[:-1] == eps[1:]
+
+    allowed = np.asarray([action_allowed(frame) for frame in obs], dtype=bool)
+    allowed_now = allowed[:-1]
+    rising_next = (~actions_bool[:-1]) & actions_bool[1:]
+    initial_press = same_episode & allowed_now & rising_next
+    reentered_pressable = same_episode & actions_bool[1:] & allowed[1:] & (~allowed[:-1])
+    labels[:-1] = initial_press.astype(np.uint8)
+    labels[1:] = np.maximum(labels[1:], reentered_pressable.astype(np.uint8))
+    return labels
 
 
 def find_shards(shard_root: str | Path) -> list[list[Path]]:
@@ -82,9 +147,15 @@ class ShardIndex:
                 data = np.load(p)
                 raw_eps = data["episode_ids"].astype(np.int64)
                 effective_eps = session_idx * SESSION_STRIDE + raw_eps
+                semantics = str(data["target_semantics"]) if "target_semantics" in data else "raw_held_input"
+                if semantics == TARGET_SEMANTICS:
+                    labels = data["actions"].astype(np.uint8)
+                else:
+                    labels = raw_input_to_press_labels(data["obs"], data["actions"], effective_eps)
                 self._shards.append({
                     "obs": data["obs"],
                     "actions": data["actions"],
+                    "labels": labels,
                     "episode_ids": effective_eps,
                     "session_idx": session_idx,
                     "path": p,
@@ -103,16 +174,26 @@ class ShardIndex:
         s = self._shards[shard_i]
         return s["obs"][local], int(s["actions"][local]), int(s["episode_ids"][local])
 
+    def get_label(self, global_idx: int) -> int:
+        """Return the BC target label at flat index."""
+        shard_i = int(np.searchsorted(self.cum, global_idx, side="right") - 1)
+        local = global_idx - int(self.cum[shard_i])
+        return int(self._shards[shard_i]["labels"][local])
+
     def episode_ids_array(self) -> np.ndarray:
         return np.concatenate([s["episode_ids"] for s in self._shards])
 
 
 class HumanPlayDataset(Dataset):
-    """Dataset of (stacked_obs, action) for behavioral cloning.
+    """Dataset of (stacked_obs, grounded_jump_action) for behavioral cloning.
 
     stacked_obs has shape (stack_size * 608,). Frames in the stack are ordered
     oldest → newest. If the stack would cross an episode boundary backward,
     the oldest available frame in the current episode is replicated.
+
+    Raw recording shards store held input after physics has applied it, so BC
+    labels are shifted to the grounded frame immediately before the recorded
+    rising edge. DAgger shards can store already-timed labels directly.
     """
 
     def __init__(
@@ -171,8 +252,8 @@ class HumanPlayDataset(Dataset):
         x = self._stacked_obs(idx)
         if self.preprocessor is not None:
             x = self.preprocessor.process_stacked(x, stack_size=self.stack_size)
-        _, action, _ = self.index.get(idx)
-        return torch.from_numpy(x), torch.tensor(action, dtype=torch.float32)
+        label = self.index.get_label(idx)
+        return torch.from_numpy(x), torch.tensor(label, dtype=torch.float32)
 
 
 def train_val_split(

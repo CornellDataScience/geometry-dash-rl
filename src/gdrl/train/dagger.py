@@ -33,7 +33,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from gdrl.data.dagger_align import align, build_human_index
+from gdrl.data.dagger_align import align_to_press_events, build_human_index, cluster_press_x
+from gdrl.data.obs_dataset import TARGET_SEMANTICS, action_allowed, grounded_jump_labels
 from gdrl.env.geode_ipc_v3 import GeodeIPCV3Config, GeodeV3Adapter
 from gdrl.env.privileged_env import GDPrivilegedEnv
 from gdrl.model.mlp_agent import GDPolicyMLP
@@ -52,6 +53,7 @@ def _rollout_policy(
     episodes: int,
     device: torch.device,
     deterministic: bool,
+    action_threshold: float,
 ):
     """Run policy for N episodes. Returns parallel arrays:
     - obs_raw  (T, 608)   raw per-frame obs straight from the IPC
@@ -59,8 +61,9 @@ def _rollout_policy(
     - actions  (T,)       action the policy actually took (uint8)
     - ep_ids   (T,)       1-indexed episode id
 
-    `deterministic=True` selects the argmax of the logit (greedy).
-    `deterministic=False` samples from Bernoulli(logits=logit) for diversity.
+    `deterministic=True` selects logit > action_threshold (greedy).
+    `deterministic=False` samples from Bernoulli(logits=logit - threshold)
+    for diversity around the same live-eval decision boundary.
     """
     all_obs: list[np.ndarray] = []
     all_x: list[float] = []
@@ -84,10 +87,12 @@ def _rollout_policy(
                 logit, _ = policy(obs_t)
                 logit_v = float(logit.squeeze().item())
             if deterministic:
-                action = int(logit_v > 0.0)
+                action = int(logit_v > action_threshold)
             else:
-                p = 1.0 / (1.0 + np.exp(-logit_v))
+                p = 1.0 / (1.0 + np.exp(-(logit_v - action_threshold)))
                 action = int(np.random.random() < p)
+            if not action_allowed(raw_obs):
+                action = 0
 
             all_obs.append(raw_obs.copy())
             all_x.append(x)
@@ -118,9 +123,10 @@ def _setup_combined_data_dir(human_data_root: Path, out_dir: Path,
                              dagger_session_name: str) -> Path:
     """Create out_dir/data/ that imitation.py can consume.
 
-    Symlinks every session subdirectory of human_data_root into the combined
-    dir, then adds an empty subdirectory for the new DAgger session (the
-    caller writes the shard into it).
+    Creates real session directories in the combined dir and symlinks shard
+    files inside them. pathlib's rglob does not recurse into symlinked
+    directories on all platforms, so directory-level symlinks can silently
+    exclude the human data from BC retraining.
     """
     combined = out_dir / "data"
     combined.mkdir(parents=True, exist_ok=True)
@@ -128,13 +134,15 @@ def _setup_combined_data_dir(human_data_root: Path, out_dir: Path,
     for sess in human_data_root.iterdir():
         if not sess.is_dir():
             continue
-        link = combined / sess.name
-        if link.is_symlink() or link.exists():
-            try:
+        session_dir = combined / sess.name
+        if session_dir.is_symlink():
+            session_dir.unlink()
+        session_dir.mkdir(exist_ok=True)
+        for shard in sorted(sess.glob("shard_*.npz")):
+            link = session_dir / shard.name
+            if link.exists() or link.is_symlink():
                 link.unlink()
-            except IsADirectoryError:
-                continue  # already a real dir, leave it
-        link.symlink_to(sess.resolve())
+            link.symlink_to(shard.resolve())
 
     dagger_session_dir = combined / dagger_session_name
     dagger_session_dir.mkdir(exist_ok=True)
@@ -155,6 +163,12 @@ def main() -> int:
     ap.add_argument("--bc-patience", type=int, default=5)
     ap.add_argument("--bc-lr", type=float, default=3e-4)
     ap.add_argument("--bc-batch-size", type=int, default=256)
+    ap.add_argument("--label-x-tolerance", type=float, default=20.0,
+                    help="X-distance tolerance for matching rollout frames to grounded human press events.")
+    ap.add_argument("--press-cluster-gap", type=float, default=80.0,
+                    help="Cluster human press X positions within this distance into one expert event.")
+    ap.add_argument("--threshold", type=float, default=None,
+                    help="Action logit threshold for rollout. Defaults to checkpoint action_threshold if present, else 0.")
     ap.add_argument("--deterministic", action="store_true",
                     help="Greedy action selection during rollouts. Default is stochastic Bernoulli "
                          "sampling for state diversity.")
@@ -175,6 +189,9 @@ def main() -> int:
     ckpt = torch.load(args.policy, map_location=device, weights_only=False)
     input_dim = ckpt.get("input_dim", PROCESSED_FRAME_DIM * 4)
     stack_size = ckpt.get("stack_size", 4)
+    action_threshold = args.threshold
+    if action_threshold is None:
+        action_threshold = float(ckpt.get("action_threshold", 0.0))
 
     policy = GDPolicyMLP(input_dim=input_dim, stack_size=stack_size).to(device)
     policy.load_state_dict(ckpt["model_state_dict"])
@@ -188,6 +205,7 @@ def main() -> int:
     preprocessor = ObsPreprocessor(normalizer=normalizer)
     print(f"  input_dim={input_dim} stack={stack_size} mode={'greedy' if args.deterministic else 'stochastic'}",
           flush=True)
+    print(f"  action_threshold={action_threshold:+.3f}", flush=True)
 
     # === Phase 2: roll out in live game ===
     print(f"[2/5] rolling out {args.episodes} episodes...", flush=True)
@@ -199,6 +217,7 @@ def main() -> int:
             policy=policy, env=env, preprocessor=preprocessor,
             stack_size=stack_size, episodes=args.episodes,
             device=device, deterministic=args.deterministic,
+            action_threshold=action_threshold,
         )
     finally:
         adapter.close()
@@ -208,17 +227,31 @@ def main() -> int:
           f"x range=[{x_pos.min():.0f}, {x_pos.max():.0f}]",
           flush=True)
 
-    # === Phase 3: label each visited state with the macro's action via x-position ===
-    print(f"[3/5] aligning to human actions from {args.human_data}...", flush=True)
+    # === Phase 3: label each visited state with grounded human jump presses via x-position ===
+    print(f"[3/5] aligning to grounded human jump presses from {args.human_data}...", flush=True)
     human_x, human_actions = build_human_index(args.human_data)
-    labeled_actions = align(x_pos, human_x, human_actions)
-
-    agreement = float((policy_actions == labeled_actions).mean())
-    print(f"  policy jump_rate={policy_actions.mean():.3f}  "
-          f"label jump_rate={labeled_actions.mean():.3f}  "
-          f"agreement={agreement:.3f}",
+    raw_human_press_x = human_x[human_actions.astype(bool)]
+    human_press_x = cluster_press_x(raw_human_press_x, gap=args.press_cluster_gap)
+    print(f"  human grounded press samples={len(raw_human_press_x)}  "
+          f"clustered_events={len(human_press_x)}  "
+          f"x range=[{human_press_x.min():.0f}, {human_press_x.max():.0f}]"
+          if len(human_press_x) else "  human grounded press events=0",
           flush=True)
-    print(f"  → {n_frames - int(agreement * n_frames)} disagreement frames "
+    labeled_actions = align_to_press_events(
+        x_pos,
+        human_press_x,
+        args.label_x_tolerance,
+        rollout_on_ground=np.asarray([action_allowed(frame) for frame in obs_raw], dtype=bool),
+        episode_ids=ep_ids,
+    )
+
+    grounded_policy_actions = grounded_jump_labels(obs_raw, policy_actions)
+    grounded_agreement = float((grounded_policy_actions == labeled_actions).mean())
+    print(f"  policy grounded_jump_rate={grounded_policy_actions.mean():.3f}  "
+          f"label grounded_jump_rate={labeled_actions.mean():.3f}  "
+          f"grounded_agreement={grounded_agreement:.3f}",
+          flush=True)
+    print(f"  -> {n_frames - int(grounded_agreement * n_frames)} grounded disagreement frames "
           f"(these are the new DAgger training samples)",
           flush=True)
 
@@ -242,6 +275,8 @@ def main() -> int:
         episode_ids=ep_ids,
         is_dead=np.zeros(n_frames, dtype=np.uint8),
         level_done=np.zeros(n_frames, dtype=np.uint8),
+        target_semantics=np.array(TARGET_SEMANTICS),
+        action_threshold=np.array(action_threshold, dtype=np.float32),
     )
     print(f"  shard -> {shard_path}", flush=True)
     print(f"  combined data dir -> {dagger_session_dir.parent}", flush=True)
@@ -253,8 +288,10 @@ def main() -> int:
         obs=obs_raw,
         x_pos=x_pos,
         policy_actions=policy_actions,
+        grounded_policy_actions=grounded_policy_actions,
         labeled_actions=labeled_actions,
         episode_ids=ep_ids,
+        action_threshold=np.array(action_threshold, dtype=np.float32),
     )
     print(f"  diagnostics -> {raw_diag_path}", flush=True)
 

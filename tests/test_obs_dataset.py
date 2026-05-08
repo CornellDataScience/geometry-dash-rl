@@ -10,6 +10,8 @@ from gdrl.data.obs_dataset import (
     ShardIndex,
     train_val_split,
     find_shards,
+    TARGET_SEMANTICS,
+    raw_input_to_press_labels,
     OBS_DIM,
     SESSION_STRIDE,
 )
@@ -19,6 +21,7 @@ def _make_shard(path: Path, n: int, episode_id: int = 1, start_tick: int = 0):
     obs = np.zeros((n, OBS_DIM), dtype=np.float32)
     for i in range(n):
         obs[i, 0] = float(start_tick + i)  # encode tick in obs[0] for verification
+        obs[i, 4] = 1.0  # default test frames are grounded
     np.savez_compressed(
         path,
         obs=obs,
@@ -199,8 +202,59 @@ def test_action_label_matches_index(tmp_path):
     ds = HumanPlayDataset(tmp_path, stack_size=1)
     for i in range(12):
         _, y = ds[i]
-        expected = float(i % 3 == 0)
+        expected = float(i in (2, 5, 8))
         assert float(y) == expected
+
+
+def test_raw_input_label_moves_press_to_previous_grounded_frame(tmp_path):
+    obs = np.zeros((4, OBS_DIM), dtype=np.float32)
+    obs[:, 0] = np.arange(4, dtype=np.float32)
+    obs[:, 4] = np.array([1, 1, 0, 1], dtype=np.float32)
+    actions = np.array([0, 1, 1, 0], dtype=np.uint8)
+    np.savez_compressed(
+        tmp_path / "shard_00000.npz",
+        obs=obs,
+        actions=actions,
+        ticks=np.arange(4, dtype=np.uint32),
+        episode_ids=np.ones(4, dtype=np.uint32),
+        is_dead=np.zeros(4, dtype=np.uint8),
+        level_done=np.zeros(4, dtype=np.uint8),
+    )
+
+    ds = HumanPlayDataset(tmp_path, stack_size=1)
+    labels = [float(ds[i][1]) for i in range(4)]
+    assert labels == [1.0, 0.0, 0.0, 0.0]
+    assert raw_input_to_press_labels(obs, actions).tolist() == [1, 0, 0, 0]
+
+
+def test_held_input_labels_pressable_reentry(tmp_path):
+    obs = np.zeros((5, OBS_DIM), dtype=np.float32)
+    obs[:, 0] = np.arange(5, dtype=np.float32)
+    obs[:, 4] = np.array([1, 0, 0, 1, 0], dtype=np.float32)
+    actions = np.array([0, 1, 1, 1, 1], dtype=np.uint8)
+
+    labels = raw_input_to_press_labels(obs, actions)
+
+    assert labels.tolist() == [1, 0, 0, 1, 0]
+
+
+def test_already_labeled_shard_uses_actions_directly(tmp_path):
+    obs = np.zeros((4, OBS_DIM), dtype=np.float32)
+    obs[:, 4] = 1.0
+    labels = np.array([0, 1, 0, 1], dtype=np.uint8)
+    np.savez_compressed(
+        tmp_path / "shard_00000.npz",
+        obs=obs,
+        actions=labels,
+        ticks=np.arange(4, dtype=np.uint32),
+        episode_ids=np.ones(4, dtype=np.uint32),
+        is_dead=np.zeros(4, dtype=np.uint8),
+        level_done=np.zeros(4, dtype=np.uint8),
+        target_semantics=np.array(TARGET_SEMANTICS),
+    )
+
+    ds = HumanPlayDataset(tmp_path, stack_size=1)
+    assert [float(ds[i][1]) for i in range(4)] == [0.0, 1.0, 0.0, 1.0]
 
 
 def test_shard_writer_creates_session_subdir(tmp_path):

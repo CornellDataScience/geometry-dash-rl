@@ -11,7 +11,8 @@ Output directory layout:
         shard_00001.npz
         ...
 
-Each shard contains: obs, actions, episode_ids (+ zero-filled ticks/is_dead/level_done).
+Each shard contains: obs, grounded jump-press actions, episode_ids
+(+ zero-filled ticks/is_dead/level_done).
 
 Usage:
     python -m gdrl.data.dagger_dataset \
@@ -26,11 +27,11 @@ from pathlib import Path
 
 import numpy as np
 
-from gdrl.data.obs_dataset import find_shards, ShardIndex, OBS_DIM
+from gdrl.data.obs_dataset import TARGET_SEMANTICS, find_shards, ShardIndex, OBS_DIM
 
 
 def _load_human(shard_root: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load all human recording shards. Returns (obs, actions, episode_ids)."""
+    """Load all human recording shards. Returns (obs, grounded_labels, episode_ids)."""
     sessions = find_shards(shard_root)
     if not sessions:
         raise FileNotFoundError(f"no human shards found under {shard_root}")
@@ -42,7 +43,7 @@ def _load_human(shard_root: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndar
     for i in range(n):
         o, a, ep = index.get(i)
         obs[i] = o
-        actions[i] = a
+        actions[i] = index.get_label(i)
         episode_ids[i] = ep
     return obs, actions, episode_ids
 
@@ -103,6 +104,7 @@ def _write_shards(
             ticks=np.zeros(end - start, dtype=np.uint32),
             is_dead=np.zeros(end - start, dtype=np.uint8),
             level_done=np.zeros(end - start, dtype=np.uint8),
+            target_semantics=np.array(TARGET_SEMANTICS),
         )
         shard_idx += 1
     return shard_idx
@@ -118,7 +120,7 @@ def main() -> int:
 
     print("loading human recordings ...", flush=True)
     h_obs, h_actions, h_eps = _load_human(args.human_data)
-    print(f"  human: {len(h_obs)} frames  jump_rate={h_actions.mean():.3f}", flush=True)
+    print(f"  human: {len(h_obs)} frames  grounded_jump_rate={h_actions.mean():.3f}", flush=True)
 
     print(f"loading DAgger labeled data from {args.labeled_dir} ...", flush=True)
     labeled = _load_labeled(args.labeled_dir)
@@ -135,14 +137,14 @@ def main() -> int:
         actions = np.concatenate([h_actions, d_actions], axis=0)
         episode_ids = np.concatenate([h_eps, d_eps], axis=0)
         print(
-            f"  dagger labeled: {len(d_obs)} frames  jump_rate={d_actions.mean():.3f}",
+            f"  dagger labeled: {len(d_obs)} frames  grounded_jump_rate={d_actions.mean():.3f}",
             flush=True,
         )
 
     print(
         f"total: {len(obs)} frames  "
         f"human={len(h_obs)}  dagger={len(obs) - len(h_obs)}  "
-        f"jump_rate={actions.mean():.3f}",
+        f"grounded_jump_rate={actions.mean():.3f}",
         flush=True,
     )
 

@@ -10,7 +10,7 @@ Usage:
 
 The recorder consumes the mod's ring buffer and writes shards. Each shard:
     obs:         (N, 608) float32
-    actions:     (N,)     uint8       # 1 if human jumped this frame
+    actions:     (N,)     uint8       # raw held input; BC gates this with obs[4] on_ground
     ticks:       (N,)     uint32
     episode_ids: (N,)     uint32
     is_dead:     (N,)     uint8

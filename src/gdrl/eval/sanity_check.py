@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from gdrl.data.obs_dataset import action_allowed, near_jump_orb, raw_input_to_press_labels
 from gdrl.model.mlp_agent import GDPolicyMLP
 from gdrl.model.obs_preprocess import (
     ObsPreprocessor,
@@ -52,6 +53,11 @@ def main() -> int:
     data = np.load(args.shard)
     obs = data["obs"]    # (N, 608)
     actions = data["actions"]  # (N,)
+    episode_ids = data["episode_ids"] if "episode_ids" in data else None
+    labels = actions.astype(np.uint8)
+    semantics = str(data["target_semantics"]) if "target_semantics" in data else "raw_held_input"
+    if semantics != "grounded_jump_press":
+        labels = raw_input_to_press_labels(obs, actions, episode_ids)
     n = min(len(obs), args.max_frames)
     print(f"running {n} frames from {args.shard}", flush=True)
 
@@ -74,8 +80,9 @@ def main() -> int:
         with torch.no_grad():
             logit, _ = model(x)
         logit_val = float(logit.squeeze().item())
-        pred = 1 if logit_val > 0.0 else 0
-        label = int(actions[i])
+        allowed = action_allowed(obs[i])
+        pred = 1 if logit_val > 0.0 and allowed else 0
+        label = int(labels[i])
 
         if pred == label:
             correct += 1
@@ -88,7 +95,9 @@ def main() -> int:
 
         # print first 50 frames for inspection
         if i < 50 or (i % 50 == 0):
-            print(f"  frame {i:4d}  logit={logit_val:+.3f}  pred={pred}  label={label}  "
+            print(f"  frame {i:4d}  on_ground={int(obs[i, 4] > 0.5)}  "
+                  f"orb={int(near_jump_orb(obs[i]))}  "
+                  f"logit={logit_val:+.3f}  pred={pred}  label={label}  "
                   f"{'✓' if pred == label else '✗'}", flush=True)
 
     print(f"\nsummary over {n} frames:")

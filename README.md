@@ -1,11 +1,32 @@
 # geometry-dash-rl
 
-Teacher-student RL pipeline for Geometry Dash using a Geode shared-memory bridge.
+CV-based Rainbow DQN with mode-gated MoE for Geometry Dash, over a Geode SHM bridge that publishes both privileged state and 128×128 grayscale frames.
+
+Pipeline:
+- Geode mod (`mods/TrainingPipeline`) writes ring-buffer state + frame mirror + accepts action/reset/load-level commands via `/gdrl_ipc_v4` shared memory.
+- Python (`src/gdrl/...`) trains a `ModeGatedRainbow` (DeeperDQN backbone + 4 dueling heads gated by gamemode) with PER + n-step + NoisyNet + privileged-state aux supervision.
+- Curriculum across `stereo_madness`, `back_on_track`, `polargeist`. Online checkpoint capture supports mid-level random spawn.
+
+Old PPO/BC/DAgger code lives in `archive/` (not maintained).
+
+## Quickstart
+
+```bash
+make setup            # venv + deps
+make mod              # build & install Geode mod
+# launch GD with the mod loaded, then:
+make smoke            # dump 30 frames to /tmp/gdrl_smoke_*.png to verify capture
+make train-sm         # single-level Stereo Madness baseline
+make train            # full curriculum
+make eval             # greedy eval of latest checkpoint
+```
+
+TB logs in `artifacts/dqn_cv/logs/`.
 
 ## Requirements
 
 - Python `>=3.10`
-- Python deps from `requirements.txt` (`torch`, `stable-baselines3`, `gymnasium`, etc.)
+- Python deps from `requirements.txt` (`torch`, `gymnasium`, `tensorboard`, etc.)
 - Geometry Dash `2.2081` and Geode SDK
 
 ## Setup

@@ -1,180 +1,102 @@
-"""Live in-game evaluation of a trained model.
+"""Greedy live in-game evaluation of a CV Rainbow checkpoint.
 
-Runs the model on the currently loaded GD level for N episodes,
-measuring progress (X position), survival time, and completion rate.
+Loads a checkpoint saved by gdrl.train.dqn_cv and runs N greedy episodes per
+level, reporting per-level success rate, mean / best max-percent, and per-mode
+action distribution.
 
 Usage:
-    python -m gdrl.eval.live_eval --model artifacts/bc_model.pt --episodes 10
+    python -m gdrl.eval.live_eval --checkpoint artifacts/dqn_cv/latest.pt --episodes 5 \\
+        --levels stereo_madness back_on_track polargeist
 """
 from __future__ import annotations
-
 import argparse
-import sys
-import time
-from pathlib import Path
+import os
+from collections import defaultdict
 
 import numpy as np
 import torch
 
-from gdrl.env.geode_ipc_v3 import GeodeV3Adapter, GeodeIPCV3Config
-from gdrl.model.mlp_agent import GDPolicyMLP
-from gdrl.model.obs_preprocess import (
-    ObsPreprocessor,
-    ObsNormalizer,
-    PROCESSED_FRAME_DIM,
-    RAW_OBS_DIM,
-)
+from gdrl.env.cv_env import GDCvEnv, CvEnvConfig
+from gdrl.model.cv_moe_dqn import ModeGatedRainbow
+from gdrl.train.dqn_cv import LEVELS
 
 
-def run_eval(
-    model: GDPolicyMLP,
-    adapter: GeodeV3Adapter,
-    preprocessor: ObsPreprocessor,
-    n_episodes: int = 10,
-    stack_size: int = 4,
-    timeout_s: float = 0.2,
-    verbose: bool = False,
-) -> dict:
-    """Run model for n_episodes, return aggregate metrics."""
-    results = []
-
-    for ep in range(n_episodes):
-        # reset level
-        adapter.send_reset()
-        time.sleep(0.3)
-
-        # wait for level to start
-        if not adapter.wait_next_tick(timeout_s=5.0):
-            print(f"  episode {ep+1}: timeout waiting for level start", flush=True)
-            continue
-
-        obs_stack = None
-        steps = 0
-        max_x = 0.0
-        completed = False
-        n_jumps_sent = 0
-
-        while True:
-            if not adapter.wait_next_tick(timeout_s=timeout_s):
-                break  # level ended or game paused
-
-            raw_obs = adapter.read_obs()
-            x_pos = float(raw_obs[0])
-            is_dead = bool(raw_obs[5])
-            level_done = adapter.read_level_complete_flag()
-
-            max_x = max(max_x, x_pos)
-
-            if is_dead:
-                break
-            if level_done:
-                completed = True
-                break
-
-            # initialize stack by replicating first frame (matches training)
-            if obs_stack is None:
-                obs_stack = np.tile(raw_obs, (stack_size, 1))
-            else:
-                # shift left, add new frame
-                obs_stack[:-1] = obs_stack[1:]
-                obs_stack[-1] = raw_obs
-
-            # preprocess and get action
-            stacked_flat = obs_stack.reshape(-1)
-            processed = preprocessor.process_stacked(stacked_flat, stack_size=stack_size)
-            x_tensor = torch.from_numpy(processed).unsqueeze(0)
-            with torch.no_grad():
-                logit, _ = model(x_tensor)
-            logit_val = float(logit.squeeze().item())
-            action = 1 if logit_val > 0.0 else 0
-            adapter.send_action(action)
-            if action == 1:
-                n_jumps_sent += 1
-
-            if verbose and (steps < 20 or steps % 30 == 0 or action == 1):
-                print(
-                    f"    step={steps:4d}  x={x_pos:7.0f}  y={raw_obs[1]:6.0f}  "
-                    f"vy={raw_obs[2]:+6.2f}  on_ground={int(raw_obs[4])}  "
-                    f"logit={logit_val:+7.3f}  action={action}",
-                    flush=True,
-                )
-
-            steps += 1
-
-        results.append({
-            "episode": ep + 1,
-            "steps": steps,
-            "max_x": max_x,
-            "completed": completed,
-        })
-        print(
-            f"  episode {ep+1}/{n_episodes}: "
-            f"steps={steps} max_x={max_x:.0f} jumps_sent={n_jumps_sent} "
-            f"{'COMPLETED' if completed else 'died'}",
-            flush=True,
-        )
-
-    if not results:
-        return {"avg_x": 0, "best_x": 0, "avg_steps": 0, "completion_rate": 0, "episodes": 0}
-
-    return {
-        "avg_x": np.mean([r["max_x"] for r in results]),
-        "best_x": max(r["max_x"] for r in results),
-        "avg_steps": np.mean([r["steps"] for r in results]),
-        "completion_rate": sum(r["completed"] for r in results) / len(results),
-        "episodes": len(results),
-    }
+def _device(s: str) -> torch.device:
+    if s == "auto":
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+    return torch.device(s)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Evaluate trained model in-game.")
-    ap.add_argument("--model", required=True, help="Path to model checkpoint.")
-    ap.add_argument("--norm", default=None, help="Path to normalizer .npz (auto-detected if not given).")
-    ap.add_argument("--episodes", type=int, default=10)
-    ap.add_argument("--shm-name", default="gdrl_ipc_v3")
-    ap.add_argument("--stack", type=int, default=4)
-    ap.add_argument("--verbose", action="store_true", help="Print per-frame debug info.")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--levels", nargs="+", default=list(LEVELS), choices=list(LEVELS))
+    ap.add_argument("--episodes", type=int, default=5)
+    ap.add_argument("--max-steps", type=int, default=8000)
+    ap.add_argument("--device", type=str, default="auto")
     args = ap.parse_args()
 
-    # load model
-    checkpoint = torch.load(args.model, map_location="cpu", weights_only=False)
-    input_dim = checkpoint.get("input_dim", PROCESSED_FRAME_DIM * args.stack)
-    stack_size = checkpoint.get("stack_size", args.stack)
-    model = GDPolicyMLP(input_dim=input_dim, stack_size=stack_size)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    device = _device(args.device)
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    print(f"loaded {args.checkpoint} (env_steps={ckpt.get('env_steps','?')} "
+          f"episode={ckpt.get('episode','?')} curriculum_idx={ckpt.get('curriculum_idx','?')})")
+
+    aux_enabled = ckpt.get("cfg", {}).get("aux_enabled", True)
+    model = ModeGatedRainbow(stack=4, aux=aux_enabled).to(device)
+    model.load_state_dict(ckpt["online"])
     model.eval()
-    print(f"loaded model from {args.model} (epoch {checkpoint.get('epoch', '?')})", flush=True)
 
-    # load normalizer
-    norm_path = args.norm
-    if norm_path is None:
-        auto_path = Path(args.model).with_suffix(".norm.npz")
-        if auto_path.exists():
-            norm_path = str(auto_path)
-    if norm_path:
-        normalizer = ObsNormalizer.load(norm_path)
-        print(f"loaded normalizer from {norm_path}", flush=True)
-    else:
-        normalizer = None
-        print("no normalizer found, using raw observations", flush=True)
+    env = GDCvEnv(cfg=CvEnvConfig(stack=4, max_steps=args.max_steps))
 
-    preprocessor = ObsPreprocessor(normalizer=normalizer)
-
-    # connect to game
-    adapter = GeodeV3Adapter(GeodeIPCV3Config(shm_name=args.shm_name))
-    print(f"connected to SHM '{args.shm_name}'", flush=True)
-
+    summary = {}
     try:
-        metrics = run_eval(model, adapter, preprocessor, n_episodes=args.episodes,
-                           stack_size=stack_size, verbose=args.verbose)
-    finally:
-        adapter.close()
+        for name in args.levels:
+            level_id = LEVELS[name]
+            wins, max_pcts, rewards, mode_actions = 0, [], [], defaultdict(lambda: np.zeros(2, dtype=np.int64))
+            for ep in range(args.episodes):
+                obs, info = env.reset(options={"level_id": level_id, "percent": 0})
+                ep_r = 0.0
+                ep_max = info["percent"]
+                while True:
+                    f = torch.from_numpy(obs["frame"]).unsqueeze(0).to(device)
+                    m = torch.tensor([obs["mode_id"]], dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        q = model(f, m)
+                    a = int(q.argmax(dim=-1).item())
+                    mode_actions[obs["mode_id"]][a] += 1
+                    obs, r, term, trunc, info = env.step(a)
+                    ep_r += r
+                    ep_max = max(ep_max, info["percent"])
+                    if term or trunc:
+                        break
+                won = info["percent"] >= 99.0 and not info["is_dead"]
+                wins += int(won)
+                max_pcts.append(ep_max)
+                rewards.append(ep_r)
+                print(f"  [{name}] ep {ep+1}/{args.episodes}: max_pct={ep_max:.1f} won={won} reward={ep_r:.1f}")
 
-    print(f"\nresults ({metrics['episodes']} episodes):")
-    print(f"  avg X:       {metrics['avg_x']:.0f}")
-    print(f"  best X:      {metrics['best_x']:.0f}")
-    print(f"  avg steps:   {metrics['avg_steps']:.0f}")
-    print(f"  completion:  {metrics['completion_rate']*100:.0f}%")
+            summary[name] = {
+                "win_rate": wins / max(args.episodes, 1),
+                "best_pct": float(max(max_pcts) if max_pcts else 0.0),
+                "mean_pct": float(np.mean(max_pcts) if max_pcts else 0.0),
+                "mean_reward": float(np.mean(rewards) if rewards else 0.0),
+                "mode_actions": {int(k): v.tolist() for k, v in mode_actions.items()},
+            }
+    finally:
+        env.close()
+
+    print("\n=== summary ===")
+    for name, m in summary.items():
+        print(f"{name}: win_rate={m['win_rate']:.2f} best_pct={m['best_pct']:.1f} "
+              f"mean_pct={m['mean_pct']:.1f} mean_reward={m['mean_reward']:.1f}")
+        for mode_id, counts in m["mode_actions"].items():
+            total = sum(counts)
+            jump_frac = counts[1] / total if total else 0.0
+            print(f"    mode={mode_id}: actions={counts} jump_frac={jump_frac:.2f}")
     return 0
 
 

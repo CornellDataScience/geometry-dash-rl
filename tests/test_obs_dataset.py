@@ -238,6 +238,18 @@ def test_held_input_labels_pressable_reentry(tmp_path):
     assert labels.tolist() == [1, 0, 0, 1, 0]
 
 
+def test_held_input_labels_vy_bounce_without_ground_flag(tmp_path):
+    obs = np.zeros((5, OBS_DIM), dtype=np.float32)
+    obs[:, 0] = np.arange(5, dtype=np.float32)
+    obs[:, 2] = np.array([5.0, -3.0, 8.0, 4.0, 1.0], dtype=np.float32)
+    obs[:, 4] = np.array([1, 0, 0, 0, 0], dtype=np.float32)
+    actions = np.array([0, 1, 1, 1, 1], dtype=np.uint8)
+
+    labels = raw_input_to_press_labels(obs, actions)
+
+    assert labels.tolist() == [1, 1, 0, 0, 0]
+
+
 def test_already_labeled_shard_uses_actions_directly(tmp_path):
     obs = np.zeros((4, OBS_DIM), dtype=np.float32)
     obs[:, 4] = 1.0

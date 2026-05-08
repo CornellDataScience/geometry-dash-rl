@@ -75,6 +75,9 @@ def grounded_jump_labels(obs: np.ndarray, actions: np.ndarray) -> np.ndarray:
     return (np.asarray(actions).astype(bool) & allowed).astype(np.uint8)
 
 
+VY_IDX = 2  # raw obs index for vertical velocity
+
+
 def raw_input_to_press_labels(
     obs: np.ndarray,
     actions: np.ndarray,
@@ -86,6 +89,12 @@ def raw_input_to_press_labels(
     each later frame where the player becomes pressable again while input is
     still held. Telemetry records input after physics has applied it, so an
     initial rising edge is labeled one frame earlier when possible.
+
+    Hold sections (consecutive jumps while holding) are detected via vy sign
+    reversal: GD applies the re-jump in the same physics tick as landing so
+    on_ground is never True in the telemetry, but vy flips from negative to
+    positive in one frame. The label is placed at the last descending frame
+    (the decision point where the button must be held to trigger the re-jump).
     """
     obs = np.asarray(obs)
     actions_bool = np.asarray(actions).astype(bool)
@@ -105,6 +114,13 @@ def raw_input_to_press_labels(
     reentered_pressable = same_episode & actions_bool[1:] & allowed[1:] & (~allowed[:-1])
     labels[:-1] = initial_press.astype(np.uint8)
     labels[1:] = np.maximum(labels[1:], reentered_pressable.astype(np.uint8))
+
+    # Hold re-entry via vy sign reversal: vy < 0 → vy > 0 while button held and
+    # on_ground never fires (instant re-jump consumes the landing frame).
+    vy = obs[:, VY_IDX]
+    held_bounce = same_episode & actions_bool[:-1] & (vy[:-1] < 0) & (vy[1:] > 0)
+    labels[:-1] = np.maximum(labels[:-1], held_bounce.astype(np.uint8))
+
     return labels
 
 

@@ -55,6 +55,8 @@ def run_eval(
         max_x = 0.0
         completed = False
         n_jumps_sent = 0
+        n_jump_events = 0
+        prev_action = 0
 
         while True:
             if not adapter.wait_next_tick(timeout_s=timeout_s):
@@ -93,6 +95,9 @@ def run_eval(
             adapter.send_action(action)
             if action == 1:
                 n_jumps_sent += 1
+                if prev_action == 0:
+                    n_jump_events += 1
+            prev_action = action
 
             if verbose and (steps < 20 or steps % 30 == 0 or action == 1):
                 print(
@@ -110,10 +115,13 @@ def run_eval(
             "steps": steps,
             "max_x": max_x,
             "completed": completed,
+            "jump_frames": n_jumps_sent,
+            "jump_events": n_jump_events,
         })
         print(
             f"  episode {ep+1}/{n_episodes}: "
-            f"steps={steps} max_x={max_x:.0f} jumps_sent={n_jumps_sent} "
+            f"steps={steps} max_x={max_x:.0f} "
+            f"jump_events={n_jump_events} jump_frames={n_jumps_sent} "
             f"{'COMPLETED' if completed else 'died'}",
             flush=True,
         )
